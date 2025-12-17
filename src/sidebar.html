@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+
+    <!-- Material Symbols -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@400"
+    />
+
+    <style>
+      body {
+        margin: 0;
+        padding-top: 12px;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        user-select: none;
+        width: 60px;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        background: #f5f5f5;
+        color: #333;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .item {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+
+      .item.active {
+        background-color: #d0d0d0;
+      }
+
+      /* Material Symbols */
+      .icon {
+        font-family: "Material Symbols Outlined";
+        font-size: 26px;
+        line-height: 1;
+        color: #4a4a4a;
+      }
+
+      .item.active .icon {
+        color: #000;
+      }
+
+      /* Image-based icons (Drive, Gemini) */
+      .drive-icon,
+      .gemini-icon {
+        width: 26px;
+        height: 26px;
+        background-color: #4a4a4a;
+      }
+
+      .drive-icon {
+        mask: url("./img/drive.png") no-repeat center / contain;
+        -webkit-mask: url("./img/drive.png") no-repeat center / contain;
+      }
+
+      .gemini-icon {
+        mask: url("./img/gemini.png") no-repeat center / contain;
+        -webkit-mask: url("./img/gemini.png") no-repeat center / contain;
+      }
+
+      .item.active .drive-icon,
+      .item.active .gemini-icon {
+        background-color: #000;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #1e1e1e;
+          color: #e3e3e3;
+        }
+
+        .item.active {
+          background-color: #5a5a5a;
+        }
+
+        .icon {
+          color: #c5c5c5;
+        }
+
+        .item.active .icon {
+          color: #fff;
+        }
+
+        .drive-icon,
+        .gemini-icon {
+          background-color: #c5c5c5;
+        }
+
+        .item.active .drive-icon,
+        .item.active .gemini-icon {
+          background-color: #fff;
+        }
+      }
+
+      /* Settings pinned to bottom */
+      #settings {
+        position: absolute;
+        bottom: 20px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="mail" class="item active">
+      <span class="icon">mail</span>
+    </div>
+
+    <div id="calendar" class="item">
+      <span class="icon">calendar_month</span>
+    </div>
+
+    <div id="drive" class="item">
+      <span class="drive-icon"></span>
+    </div>
+
+    <div id="gemini" class="item">
+      <span class="gemini-icon"></span>
+    </div>
+
+    <div id="keep" class="item">
+      <span class="icon">keep</span>
+    </div>
+
+    <div id="tasks" class="item">
+      <span class="icon">checklist</span>
+    </div>
+
+    <div id="contacts" class="item">
+      <span class="icon">contacts_product</span>
+    </div>
+
+    <div id="settings" class="item">
+      <span class="icon">settings</span>
+    </div>
+
+    <script>
+      window.addEventListener("DOMContentLoaded", () => {
+        const items = Array.from(document.querySelectorAll(".item"));
+
+        function setActive(id) {
+          items.forEach((item) => {
+            item.classList.toggle("active", item.id === id);
+          });
+        }
+
+        items.forEach((item) => {
+          const id = item.id;
+
+          item.addEventListener("click", () => {
+            setActive(id);
+            window.electronAPI.switch(id);
+          });
+        });
+
+        if (window.electronAPI && window.electronAPI.onActiveChange) {
+          window.electronAPI.onActiveChange((id) => {
+            setActive(id);
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

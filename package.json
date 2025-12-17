@@ -1,0 +1,45 @@
+{
+  "name": "Silo",
+  "version": "1.0.0",
+  "description": "Silo is a desktop application wrapper for Google services like Gmail and Google Calendar.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "WRAPPER_APP=gmail electron .",
+    "start:gmail": "WRAPPER_APP=gmail electron .",
+    "start:calendar": "WRAPPER_APP=calendar electron .",
+    "build": "NODE_OPTIONS=--no-deprecation electron-builder --mac"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^39.2.3",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.inkling-labs.silo",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+
+      "sign": false,
+      "notarize": false,
+
+      "protocols": [
+        {
+          "name": "MailTo",
+          "schemes": ["mailto"]
+        }
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ]
+  }
+}
