@@ -1,5 +1,9 @@
 # Silo
 
+<p align="center">
+  <img src="assets/readme-header.png" alt="Silo Header" />
+</p>
+
 Silo is a lightweight Electron desktop app that brings Google Workspace tools into a focused, native-feeling experience on macOS.
 
 It is not trying to replace your browser. It is trying to reduce friction.
