@@ -10,9 +10,12 @@ const {
 } = require("electron");
 const path = require("path");
 
+// Global state: single window with multiple persistent BrowserViews
+// Each Google app lives in its own BrowserView (not tab/separate window)
+// Views persist in memory even when hidden - maintains state between switches
 let mainWindow = null;
-let views = {};
-let currentView = "mail";
+let views = {}; // Registry of all BrowserViews keyed by name (mail, calendar, etc.)
+let currentView = "mail"; // Tracks which content view is currently visible
 
 const isMac = process.platform === "darwin";
 
@@ -24,14 +27,16 @@ const VIEW_URLS = {
   keep: "https://keep.google.com",
   tasks: "https://tasks.google.com",
   contacts: "https://contacts.google.com",
-  settings: `file://${path.join(__dirname, "settings.html")}`,
+  settings: `file://${path.join(__dirname, "../renderer/settings.html")}`,
 };
 
+// Load menu icons as templates for native macOS appearance
+// Template images automatically adapt to light/dark mode and menu state
 function loadMenuIcon(name) {
   const icon = nativeImage.createFromPath(
     path.join(__dirname, "../assets/menu", `${name}.png`)
   );
-  icon.setTemplateImage(true);
+  icon.setTemplateImage(true); // Enables automatic color adaptation
   return icon;
 }
 
@@ -40,6 +45,9 @@ const menuIcons = {
   reload: loadMenuIcon("reload"),
 };
 
+// Security: whitelist of allowed Google domains
+// Any navigation/window.open to external URLs opens in default browser
+// Update this list when adding new Google services
 const INTERNAL_DOMAINS = [
   "mail.google.com",
   "calendar.google.com",
@@ -59,16 +67,15 @@ function isInternalUrl(url) {
   }
 }
 
-/* -----------------------------
-   Dock badge + notifications
------------------------------- */
-
+// IPC: Update macOS dock badge with unread count from Gmail
+// Triggered by preload script monitoring Gmail's DOM/API
 ipcMain.on("unread-count", (event, count) => {
   if (isMac && app.dock) {
     app.dock.setBadge(count > 0 ? String(count) : "");
   }
 });
 
+// IPC: Show native notifications from Google apps
 ipcMain.on("notify", (event, { title, options }) => {
   new Notification({
     title,
@@ -77,19 +84,17 @@ ipcMain.on("notify", (event, { title, options }) => {
   }).show();
 });
 
-/* -----------------------------
-   BrowserView helpers
------------------------------- */
-
 function createContentView(key) {
   const view = new BrowserView({
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
+  // Security: Intercept window.open() calls
+  // Allow internal Google domains, open everything else in default browser
   view.webContents.setWindowOpenHandler(({ url }) => {
     if (isInternalUrl(url)) {
       return { action: "allow" };
@@ -99,6 +104,8 @@ function createContentView(key) {
     return { action: "deny" };
   });
 
+  // Security: Intercept navigation attempts (clicking links, redirects)
+  // Prevents external navigation, forces external URLs to open in default browser
   view.webContents.on("will-navigate", (event, url) => {
     if (!isInternalUrl(url)) {
       event.preventDefault();
@@ -110,10 +117,10 @@ function createContentView(key) {
   return view;
 }
 
-/* -----------------------------
-   Layout
------------------------------- */
-
+// Layout: Position BrowserViews using explicit bounds (CSS doesn't work on BrowserViews)
+// Sidebar: Fixed 60px width at x:0
+// Content: Fills remaining width starting at x:60
+// Called on window resize to maintain layout
 function layoutViews() {
   if (!mainWindow) return;
 
@@ -136,9 +143,13 @@ function layoutViews() {
   });
 }
 
+// View switching: Remove all views, then re-add sidebar + target view
+// Order matters: sidebar added last stays on top (z-order)
+// Views remain in memory when removed - no state loss
 function showView(name) {
   currentView = name;
 
+  // Remove all views from window (but don't destroy them)
   for (const key of Object.keys(VIEW_URLS)) {
     if (views[key]) {
       try {
@@ -147,6 +158,8 @@ function showView(name) {
     }
   }
 
+  // Re-add sidebar and target content view
+  // Sidebar must be added last to maintain proper z-order
   mainWindow.addBrowserView(views.sidebar);
   mainWindow.addBrowserView(views[name]);
 
@@ -156,10 +169,8 @@ function showView(name) {
   layoutViews();
 }
 
-/* -----------------------------
-   Create windows
------------------------------- */
-
+// Open compose/create actions in separate window (not BrowserView)
+// Used for: new email, calendar events, docs, etc.
 function openCreateWindow(url) {
   const win = new BrowserWindow({
     width: 900,
@@ -175,10 +186,6 @@ function openCreateWindow(url) {
   win.loadURL(url);
   win.focus();
 }
-
-/* -----------------------------
-   Menu
------------------------------- */
 
 function createMenu() {
   const template = [
@@ -338,10 +345,6 @@ function createMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-/* -----------------------------
-   App lifecycle
------------------------------- */
-
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1300,
@@ -355,14 +358,16 @@ function createMainWindow() {
 
   views.sidebar = new BrowserView({
     webPreferences: {
-      preload: path.join(__dirname, "sidebar-preload.js"),
+      preload: path.join(__dirname, "../preload/sidebar-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  views.sidebar.webContents.loadFile(path.join(__dirname, "sidebar.html"));
+  views.sidebar.webContents.loadFile(path.join(__dirname, "../renderer/sidebar.html"));
 
+  // Create all views at startup (no lazy loading)
+  // All Google apps load in background, ready for instant switching
   for (const key of Object.keys(VIEW_URLS)) {
     views[key] = createContentView(key);
   }

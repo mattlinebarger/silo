@@ -2,7 +2,7 @@
   "name": "Silo",
   "version": "1.0.0",
   "description": "Silo is a desktop application wrapper for Google services like Gmail and Google Calendar.",
-  "main": "src/main.js",
+  "main": "src/main/main.js",
   "scripts": {
     "start": "WRAPPER_APP=gmail electron .",
     "start:gmail": "WRAPPER_APP=gmail electron .",

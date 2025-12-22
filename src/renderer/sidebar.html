@@ -3,7 +3,6 @@
   <head>
     <meta charset="UTF-8" />
 
-    <!-- Material Symbols -->
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@400"
@@ -41,7 +40,6 @@
         background-color: #d0d0d0;
       }
 
-      /* Material Symbols */
       .icon {
         font-family: "Material Symbols Outlined";
         font-size: 26px;
@@ -53,7 +51,6 @@
         color: #000;
       }
 
-      /* Image-based icons (Drive, Gemini) */
       .drive-icon,
       .gemini-icon {
         width: 26px;
@@ -105,7 +102,6 @@
         }
       }
 
-      /* Settings pinned to bottom */
       #settings {
         position: absolute;
         bottom: 20px;
@@ -150,21 +146,25 @@
       window.addEventListener("DOMContentLoaded", () => {
         const items = Array.from(document.querySelectorAll(".item"));
 
+        // Update visual active state in sidebar
         function setActive(id) {
           items.forEach((item) => {
             item.classList.toggle("active", item.id === id);
           });
         }
 
+        // Handle sidebar clicks: update UI and notify main process
         items.forEach((item) => {
           const id = item.id;
 
           item.addEventListener("click", () => {
             setActive(id);
-            window.electronAPI.switch(id);
+            window.electronAPI.switch(id); // Trigger view switch in main process
           });
         });
 
+        // Listen for view changes from main process (keyboard shortcuts, menu)
+        // Keeps sidebar in sync when views change outside of sidebar clicks
         if (window.electronAPI && window.electronAPI.onActiveChange) {
           window.electronAPI.onActiveChange((id) => {
             setActive(id);
