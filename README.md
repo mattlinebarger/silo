@@ -35,12 +35,19 @@ Think of it as a sharp tool, not a Swiss Army knife.
 
 ## Features
 
-- Quick switching between Gmail, Calendar, Drive, Keep, Tasks, Contacts, and Gemini
-- Minimal sidebar with Material-style icons and custom icons where needed
-- Native macOS menus and keyboard shortcuts
-- Separate persistent views for each app
-- Custom settings panel
-- No tracking, no analytics, no account meddling
+- **Multiple Profile Support**
+  - Switch between multiple Google accounts with isolated sessions
+  - Custom profile pictures via upload
+  - Profile management UI with easy switching
+  - Session isolation using Electron's partition feature
+- **Quick App Switching**
+  - Fast toggling between Gmail, Calendar, Drive, Keep, Tasks, Contacts, and Gemini
+  - Separate persistent views for each app
+- **Additional Features**
+  - Minimal sidebar with Material-style icons and custom icons where needed
+  - Native macOS menus and keyboard shortcuts
+  - Custom settings panel
+  - No tracking, no analytics, no account meddling
 
 ## Tech Stack
 
@@ -49,7 +56,35 @@ Think of it as a sharp tool, not a Swiss Army knife.
 - HTML, CSS, vanilla JavaScript
 - Material Symbols plus custom icons
 
-No frameworks were harmed in the making of this app.
+## Keyboard Shortcuts
+
+- `Cmd+1` - Gmail
+- `Cmd+2` - Calendar
+- `Cmd+3` - Drive
+- `Cmd+4` - Gemini
+- `Cmd+5` - Keep
+- `Cmd+6` - Tasks
+- `Cmd+7` - Contacts
+- `Cmd+N` - New email
+- `Cmd+,` - Settings (Profile Management)
+- `Cmd+R` - Reload current view
+
+## Managing Profiles
+
+Silo supports multiple Google accounts through profiles:
+
+1. **Access Settings**: Click your profile avatar at the bottom of the sidebar, or press `Cmd+,`
+2. **Create Profile**: Click "New Profile" and give it a name
+3. **Upload Picture**: Optionally upload a custom profile picture (or use the default account icon)
+4. **Switch Profiles**: Click any profile to switch - the app will restart with that profile's session
+5. **Edit/Delete**: Use the edit and delete buttons on non-default profiles
+
+Each profile maintains its own:
+- Google account sessions
+- Login state
+- Cookies and local storage
+
+The default profile is your initial setup and cannot be deleted.
 
 ## Development Setup
 
@@ -64,11 +99,15 @@ npm install
 Run the app in development mode:
 
 ```
-npm start
-```
+npRead [CONTRIBUTING.md](CONTRIBUTING.md) for Git workflow and branching strategy
+- Open an issue first to discuss ideas
+- Keep changes focused and small
+- Prefer clarity over cleverness
+- Follow the conventional commit format: `type(scope): description`
 
-Build steps and packaging are still evolving and may change.
+This project values maintainability and restraint.
 
+See [GIT_QUICK_REFERENCE.md](GIT_QUICK_REFERENCE.md) for quick Git commands
 ## Platform Support
 
 Currently tested on:
