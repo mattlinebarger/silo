@@ -65,6 +65,13 @@ const INTERNAL_DOMAINS = [
   "sheets.google.com",
   "slides.google.com",
   "forms.google.com",
+  "google.com",                // General Google services
+  "login.microsoftonline.com", // Microsoft Entra
+  "microsoft.com",             // Microsoft services
+  "okta.com",                  // Okta authentication
+  "msauth.net",                // Microsoft authentication
+  "live.com",                  // Microsoft Live services
+  "sentry.io",                 // Sentry error tracking
 ];
 
 function isInternalUrl(url) {
@@ -193,6 +200,10 @@ function createContentView(key, partition = null) {
       const url = view.webContents.getURL();
       if (url && url.includes("accounts.google.com")) {
         wasOnAccountsPage = true;
+      } else if (url && wasOnAccountsPage && !isInternalUrl(url)) {
+        // Reset if we navigate to an external domain (like Okta)
+        // This prevents triggering restart after external auth flows
+        wasOnAccountsPage = false;
       }
     } catch (e) {
       // Ignore errors when getting URL
@@ -207,7 +218,8 @@ function createContentView(key, partition = null) {
       const hostname = new URL(url).hostname;
       
       // If we just left accounts page and are now on a Google app, login completed
-      if (wasOnAccountsPage && !hasTriggeredRestart && hostname !== "accounts.google.com" && isInternalUrl(url)) {
+      // Only trigger if coming from Google accounts (not external SSO providers)
+      if (wasOnAccountsPage && !hasTriggeredRestart && hostname !== "accounts.google.com" && hostname.includes("google.com")) {
         console.log(`[Session Sync] Login detected on ${key}, restarting window...`);
         hasTriggeredRestart = true;
         wasOnAccountsPage = false;
@@ -216,8 +228,14 @@ function createContentView(key, partition = null) {
         if (key === 'mail') {
           console.log('[Session Sync] Waiting to extract profile picture...');
           setTimeout(() => {
+            // Check if view still exists and is not destroyed
+            const mailView = views['mail'];
+            if (!mailView || mailView.webContents.isDestroyed()) {
+              console.log('[Session Sync] View no longer available, skipping profile picture extraction');
+              return;
+            }
             console.log('[Session Sync] Attempting to extract profile picture from Gmail');
-            view.webContents.executeJavaScript(`
+            mailView.webContents.executeJavaScript(`
               (function() {
                 console.log('[Profile Debug] Starting profile picture search...');
                 
