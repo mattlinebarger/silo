@@ -104,7 +104,37 @@
 
       #settings {
         position: absolute;
-        bottom: 20px;
+        bottom: 70px;
+      }
+
+      #profileAvatar {
+        position: absolute;
+        bottom: 24px;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+
+      #profileAvatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      #profileAvatar .material-symbols-outlined {
+        font-size: 40px;
+        color: #4a4a4a;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        #profileAvatar .material-symbols-outlined {
+          color: #c5c5c5;
+        }
       }
     </style>
   </head>
@@ -138,6 +168,10 @@
       <span class="icon">contacts_product</span>
     </div>
 
+    <div id="profileAvatar">
+      <!-- Profile picture will be loaded here -->
+    </div>
+
     <div id="settings" class="item">
       <span class="icon">settings</span>
     </div>
@@ -145,11 +179,20 @@
     <script>
       window.addEventListener("DOMContentLoaded", () => {
         const items = Array.from(document.querySelectorAll(".item"));
+        const profileAvatar = document.getElementById("profileAvatar");
 
         // Update visual active state in sidebar
         function setActive(id) {
           items.forEach((item) => {
             item.classList.toggle("active", item.id === id);
+          });
+        }
+
+        // Handle profile avatar click - open settings
+        if (profileAvatar) {
+          profileAvatar.addEventListener("click", () => {
+            setActive("settings");
+            window.electronAPI.switch("settings");
           });
         }
 
@@ -170,7 +213,42 @@
             setActive(id);
           });
         }
+
+        // Listen for profile updates
+        if (window.electronAPI && window.electronAPI.onProfileUpdate) {
+          window.electronAPI.onProfileUpdate((profile) => {
+            updateProfileAvatar(profile);
+          });
+        }
+
+        // Load initial profile
+        if (window.electronAPI && window.electronAPI.getActiveProfile) {
+          window.electronAPI.getActiveProfile().then(profile => {
+            updateProfileAvatar(profile);
+          });
+        }
       });
+
+      function updateProfileAvatar(profile) {
+        const avatarEl = document.getElementById('profileAvatar');
+        if (!profile) {
+          // No profile - show default account_circle
+          avatarEl.innerHTML = '<span class="material-symbols-outlined">account_circle</span>';
+          return;
+        }
+
+        avatarEl.innerHTML = '';
+        
+        if (profile.avatarPath) {
+          const img = document.createElement('img');
+          img.src = `file://${profile.avatarPath}`;
+          img.alt = profile.name;
+          avatarEl.appendChild(img);
+        } else {
+          // Default to account_circle icon
+          avatarEl.innerHTML = '<span class="material-symbols-outlined">account_circle</span>';
+        }
+      }
     </script>
   </body>
 </html>

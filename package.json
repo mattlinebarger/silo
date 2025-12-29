@@ -22,14 +22,14 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
-
       "sign": false,
       "notarize": false,
-
       "protocols": [
         {
           "name": "MailTo",
-          "schemes": ["mailto"]
+          "schemes": [
+            "mailto"
+          ]
         }
       ]
     },
@@ -41,5 +41,8 @@
       "assets/**/*",
       "package.json"
     ]
+  },
+  "dependencies": {
+    "electron-store": "^11.0.2"
   }
 }
