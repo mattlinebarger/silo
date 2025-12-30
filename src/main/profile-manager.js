@@ -6,6 +6,7 @@
 //   id: string (UUID)
 //   name: string (user-provided)
 //   avatarPath: string (path to custom profile picture, optional)
+//   enabledApps: array (list of enabled app keys: mail, calendar, drive, etc.)
 //   createdAt: number (timestamp)
 //   isDefault: boolean (true for non-partitioned session)
 // }
@@ -20,6 +21,7 @@ class ProfileManager {
             id: "default",
             name: "Default Profile",
             avatarPath: null,
+            enabledApps: ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'],
             createdAt: Date.now(),
             isDefault: true,
           },
@@ -27,6 +29,9 @@ class ProfileManager {
         activeProfileId: "default",
       },
     });
+    
+    // Migrate existing profiles to include enabledApps if missing
+    this._migrateProfiles();
   }
 
   // Get all profiles
@@ -46,12 +51,13 @@ class ProfileManager {
   }
 
   // Create new profile
-  createProfile({ name, avatarPath = null }) {
+  createProfile({ name, avatarPath = null, enabledApps = ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'] }) {
     const profiles = this.getProfiles();
     const newProfile = {
       id: this._generateId(),
       name,
       avatarPath,
+      enabledApps,
       createdAt: Date.now(),
       isDefault: false,
     };
@@ -142,6 +148,27 @@ class ProfileManager {
   // Generate unique ID
   _generateId() {
     return `profile-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+  
+  // Migrate existing profiles to include enabledApps
+  _migrateProfiles() {
+    const profiles = this.getProfiles();
+    let needsUpdate = false;
+    
+    const updatedProfiles = profiles.map(profile => {
+      if (!profile.enabledApps) {
+        needsUpdate = true;
+        return {
+          ...profile,
+          enabledApps: ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts']
+        };
+      }
+      return profile;
+    });
+    
+    if (needsUpdate) {
+      this.store.set('profiles', updatedProfiles);
+    }
   }
 }
 
