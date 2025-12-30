@@ -180,11 +180,28 @@
       window.addEventListener("DOMContentLoaded", () => {
         const items = Array.from(document.querySelectorAll(".item"));
         const profileAvatar = document.getElementById("profileAvatar");
+        let currentEnabledApps = ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts']; // Default: all enabled
 
         // Update visual active state in sidebar
         function setActive(id) {
           items.forEach((item) => {
             item.classList.toggle("active", item.id === id);
+          });
+        }
+        
+        // Update visibility of app items based on enabled apps
+        function updateAppVisibility(enabledApps) {
+          currentEnabledApps = enabledApps || currentEnabledApps;
+          items.forEach((item) => {
+            // Don't hide settings
+            if (item.id === 'settings') return;
+            
+            // Show/hide based on enabled apps
+            if (currentEnabledApps.includes(item.id)) {
+              item.style.display = 'flex';
+            } else {
+              item.style.display = 'none';
+            }
           });
         }
 
@@ -218,6 +235,7 @@
         if (window.electronAPI && window.electronAPI.onProfileUpdate) {
           window.electronAPI.onProfileUpdate((profile) => {
             updateProfileAvatar(profile);
+            updateAppVisibility(profile.enabledApps);
           });
         }
 
@@ -225,6 +243,7 @@
         if (window.electronAPI && window.electronAPI.getActiveProfile) {
           window.electronAPI.getActiveProfile().then(profile => {
             updateProfileAvatar(profile);
+            updateAppVisibility(profile.enabledApps);
           });
         }
       });

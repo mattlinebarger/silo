@@ -390,6 +390,7 @@ function recreateViews() {
   // Get new partition for active profile
   const activeProfile = profileManager.getActiveProfile();
   const partition = profileManager.getPartitionName(activeProfile.id);
+  const enabledApps = activeProfile.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
 
   // Recreate all views with new partition
   for (const key of Object.keys(VIEW_URLS)) {
@@ -407,11 +408,19 @@ function recreateViews() {
       views[key] = createContentView(key, partition);
     }
   }
+  
+  // Check if current view is enabled, if not switch to first enabled app
+  let targetView = currentViewName;
+  if (currentViewName !== 'settings' && !enabledApps.includes(currentViewName)) {
+    // Current view is disabled, switch to first enabled app
+    targetView = enabledApps[0] || 'mail';
+    console.log(`Current view ${currentViewName} is disabled, switching to ${targetView}`);
+  }
 
-  // Re-show current view
+  // Re-show target view
   mainWindow.addBrowserView(views.sidebar);
-  mainWindow.addBrowserView(views[currentViewName]);
-  currentView = currentViewName;
+  mainWindow.addBrowserView(views[targetView]);
+  currentView = targetView;
 
   layoutViews();
   
@@ -427,6 +436,17 @@ function recreateViews() {
 // Order matters: sidebar added last stays on top (z-order)
 // Views remain in memory when removed - no state loss
 function showView(name) {
+  // Check if view is enabled (except settings which is always available)
+  if (name !== 'settings') {
+    const activeProfile = profileManager.getActiveProfile();
+    const enabledApps = activeProfile?.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
+    
+    if (!enabledApps.includes(name)) {
+      console.log(`View ${name} is not enabled, ignoring switch request`);
+      return;
+    }
+  }
+  
   currentView = name;
 
   // Remove all views from window (but don't destroy them)
@@ -494,6 +514,29 @@ function buildProfilesMenu() {
 }
 
 function createMenu() {
+  const activeProfile = profileManager.getActiveProfile();
+  const enabledApps = activeProfile?.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
+  
+  // Map of app keys to menu items with labels and accelerators
+  const appMenuItems = {
+    mail: { label: "Mail", accelerator: "Cmd+1" },
+    calendar: { label: "Calendar", accelerator: "Cmd+2" },
+    drive: { label: "Drive", accelerator: "Cmd+3" },
+    gemini: { label: "Gemini", accelerator: "Cmd+4" },
+    keep: { label: "Keep", accelerator: "Cmd+5" },
+    tasks: { label: "Tasks", accelerator: "Cmd+6" },
+    contacts: { label: "Contacts", accelerator: "Cmd+7" },
+  };
+  
+  // Build Switch To submenu with only enabled apps
+  const switchToSubmenu = enabledApps
+    .filter(app => appMenuItems[app]) // Only include valid app keys
+    .map(app => ({
+      label: appMenuItems[app].label,
+      accelerator: appMenuItems[app].accelerator,
+      click: () => showView(app),
+    }));
+  
   const template = [
     {
       label: "Silo",
@@ -573,43 +616,7 @@ function createMenu() {
         { type: "separator" },
         {
           label: "Switch To",
-          submenu: [
-            {
-              label: "Mail",
-              accelerator: "Cmd+1",
-              click: () => showView("mail"),
-            },
-            {
-              label: "Calendar",
-              accelerator: "Cmd+2",
-              click: () => showView("calendar"),
-            },
-            {
-              label: "Drive",
-              accelerator: "Cmd+3",
-              click: () => showView("drive"),
-            },
-            {
-              label: "Gemini",
-              accelerator: "Cmd+4",
-              click: () => showView("gemini"),
-            },
-            {
-              label: "Keep",
-              accelerator: "Cmd+5",
-              click: () => showView("keep"),
-            },
-            {
-              label: "Tasks",
-              accelerator: "Cmd+6",
-              click: () => showView("tasks"),
-            },
-            {
-              label: "Contacts",
-              accelerator: "Cmd+7",
-              click: () => showView("contacts"),
-            },
-          ],
+          submenu: switchToSubmenu,
         },
       ],
     },
