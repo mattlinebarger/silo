@@ -76,7 +76,19 @@ const INTERNAL_DOMAINS = [
 
 function isInternalUrl(url) {
   try {
-    const { hostname } = new URL(url);
+    const urlObj = new URL(url);
+    const { hostname, searchParams } = urlObj;
+    
+    // Handle Google's redirect URLs (e.g., google.com/url?q=actual-url)
+    // Extract the real destination URL and check that instead
+    if (hostname.endsWith('google.com') && urlObj.pathname === '/url') {
+      const actualUrl = searchParams.get('q');
+      if (actualUrl) {
+        // Recursively check the actual destination URL
+        return isInternalUrl(actualUrl);
+      }
+    }
+    
     return INTERNAL_DOMAINS.some((domain) => hostname.endsWith(domain));
   } catch {
     return false;
@@ -174,9 +186,11 @@ function createContentView(key, partition = null) {
   // Allow internal Google domains, open everything else in default browser
   view.webContents.setWindowOpenHandler(({ url }) => {
     if (isInternalUrl(url)) {
+      // Allow internal URLs to open in new window
       return { action: "allow" };
     }
 
+    // External URL - open in default browser
     shell.openExternal(url);
     return { action: "deny" };
   });
@@ -184,9 +198,24 @@ function createContentView(key, partition = null) {
   // Security: Intercept navigation attempts (clicking links, redirects)
   // Prevents external navigation, forces external URLs to open in default browser
   view.webContents.on("will-navigate", (event, url) => {
-    if (!isInternalUrl(url)) {
-      event.preventDefault();
-      shell.openExternal(url);
+    // Get the current URL to check if this is a top-level navigation
+    const currentUrl = view.webContents.getURL();
+    
+    // Allow internal navigation
+    if (isInternalUrl(url)) {
+      return;
+    }
+    
+    // External URL - open in default browser and prevent navigation
+    event.preventDefault();
+    shell.openExternal(url);
+  });
+  
+  // Handle links that try to navigate within frames (like email content)
+  view.webContents.on("did-create-window", (window, details) => {
+    if (!isInternalUrl(details.url)) {
+      window.close();
+      shell.openExternal(details.url);
     }
   });
 
