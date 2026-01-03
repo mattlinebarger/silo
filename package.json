@@ -19,6 +19,7 @@
   },
   "build": {
     "appId": "com.inkling-labs.silo",
+    "productName": "Silo",
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
