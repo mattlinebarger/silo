@@ -10,7 +10,7 @@
     "build": "NODE_OPTIONS=--no-deprecation electron-builder --mac"
   },
   "keywords": [],
-  "author": "",
+  "author": "Inkling Labs",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
@@ -20,6 +20,7 @@
   "build": {
     "appId": "com.inkling-labs.silo",
     "productName": "Silo",
+    "copyright": "Copyright © 2026 Inkling Labs",
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
