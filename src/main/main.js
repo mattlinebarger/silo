@@ -19,6 +19,7 @@ let mainWindow = null;
 let views = {}; // Registry of all BrowserViews keyed by name (mail, calendar, etc.)
 let currentView = "mail"; // Tracks which content view is currently visible
 let profileManager = null; // Profile manager instance
+let globalRestartScheduled = false; // Prevent multiple views from scheduling restart simultaneously
 
 const isMac = process.platform === "darwin";
 
@@ -69,8 +70,12 @@ const INTERNAL_DOMAINS = [
   "login.microsoftonline.com", // Microsoft Entra
   "microsoft.com",             // Microsoft services
   "okta.com",                  // Okta authentication
+  "oktacdn.com",               // Okta CDN resources
+  "oktapreview.com",           // Okta preview environments
   "msauth.net",                // Microsoft authentication
   "live.com",                  // Microsoft Live services
+  "microsoftonline.com",       // Microsoft Online services
+  "windows.net",               // Azure services
   "sentry.io",                 // Sentry error tracking
 ];
 
@@ -186,11 +191,9 @@ function createContentView(key, partition = null) {
   // Allow internal Google domains, open everything else in default browser
   view.webContents.setWindowOpenHandler(({ url }) => {
     if (isInternalUrl(url)) {
-      // Allow internal URLs to open in new window
       return { action: "allow" };
     }
 
-    // External URL - open in default browser
     shell.openExternal(url);
     return { action: "deny" };
   });
@@ -198,15 +201,10 @@ function createContentView(key, partition = null) {
   // Security: Intercept navigation attempts (clicking links, redirects)
   // Prevents external navigation, forces external URLs to open in default browser
   view.webContents.on("will-navigate", (event, url) => {
-    // Get the current URL to check if this is a top-level navigation
-    const currentUrl = view.webContents.getURL();
-    
-    // Allow internal navigation
     if (isInternalUrl(url)) {
       return;
     }
-    
-    // External URL - open in default browser and prevent navigation
+
     event.preventDefault();
     shell.openExternal(url);
   });
@@ -223,6 +221,7 @@ function createContentView(key, partition = null) {
   // Detects navigation from accounts.google.com back to app domain
   let wasOnAccountsPage = false;
   let hasTriggeredRestart = false; // Prevent multiple restarts
+  let loginCheckTimer = null; // Timer for delayed login detection
   
   view.webContents.on("did-start-loading", () => {
     try {
@@ -245,25 +244,44 @@ function createContentView(key, partition = null) {
       if (!url) return;
       
       const hostname = new URL(url).hostname;
+      const pathname = new URL(url).pathname;
       
-      // If we just left accounts page and are now on a Google app, login completed
+      // Check if we're on an actual Google app page (not just accounts or generic google.com)
+      const isOnGoogleApp = (
+        hostname === 'mail.google.com' ||
+        hostname === 'calendar.google.com' ||
+        hostname === 'drive.google.com' ||
+        hostname === 'keep.google.com' ||
+        hostname === 'tasks.google.com' ||
+        hostname === 'contacts.google.com' ||
+        hostname === 'gemini.google.com'
+      );
+      
+      // Skip intermediate pages like /a/domain/acs (Assertion Consumer Service)
+      // These are part of the SSO flow, not the final destination
+      const isIntermediatePage = (
+        pathname.includes('/acs') ||
+        pathname.includes('/a/') ||
+        hostname === 'www.google.com'
+      );
+      
+      // If we just left accounts page and are now on an actual Google app, login completed
       // Only trigger if coming from Google accounts (not external SSO providers)
-      if (wasOnAccountsPage && !hasTriggeredRestart && hostname !== "accounts.google.com" && hostname.includes("google.com")) {
-        console.log(`[Session Sync] Login detected on ${key}, restarting window...`);
+      // AND we're on a real app page (not intermediate redirect)
+      // AND no restart has been scheduled globally
+      if (wasOnAccountsPage && !hasTriggeredRestart && !globalRestartScheduled && isOnGoogleApp && !isIntermediatePage) {
         hasTriggeredRestart = true;
+        globalRestartScheduled = true;
         wasOnAccountsPage = false;
         
         // Try to fetch Google profile picture from Gmail after page fully loads
         if (key === 'mail') {
-          console.log('[Session Sync] Waiting to extract profile picture...');
           setTimeout(() => {
             // Check if view still exists and is not destroyed
             const mailView = views['mail'];
             if (!mailView || mailView.webContents.isDestroyed()) {
-              console.log('[Session Sync] View no longer available, skipping profile picture extraction');
               return;
             }
-            console.log('[Session Sync] Attempting to extract profile picture from Gmail');
             mailView.webContents.executeJavaScript(`
               (function() {
                 console.log('[Profile Debug] Starting profile picture search...');
@@ -339,27 +357,25 @@ function createContentView(key, partition = null) {
                 return { success: false };
               })();
             `).then(result => {
-              console.log('[Session Sync] Profile picture extraction result:', JSON.stringify(result));
               if (result.success && result.url) {
                 const activeProfile = profileManager.getActiveProfile();
-                console.log('[Session Sync] Active profile:', activeProfile.id, activeProfile.name);
                 if (activeProfile && !activeProfile.isDefault) {
-                  console.log('[Session Sync] Saving avatar URL to profile:', result.url);
                   profileManager.updateProfile(activeProfile.id, { avatarUrl: result.url });
-                } else {
-                  console.log('[Session Sync] Skipping avatar update (default profile)');
                 }
-              } else {
-                console.log('[Session Sync] No profile picture found on Gmail page');
               }
-            }).catch(e => console.error('[Session Sync] Error fetching profile picture:', e));
-          }, 4000); // Even longer delay to ensure Gmail UI is fully loaded
+            }).catch(e => console.error('Error fetching profile picture:', e));
+          }, 6000); // Longer delay to ensure Gmail UI is fully loaded
         }
         
-        // Restart window after short delay to sync session across all views
+        // Restart window after longer delay to ensure auth flow is completely done
+        // This gives time for all redirects to complete
         setTimeout(() => {
           restartMainWindow();
-        }, 1000);
+          // Reset global flag after restart completes
+          setTimeout(() => {
+            globalRestartScheduled = false;
+          }, 2000);
+        }, 3000); // Increased from 1000ms to 3000ms
       }
     } catch (e) {
       console.error("Error in session sync:", e);
