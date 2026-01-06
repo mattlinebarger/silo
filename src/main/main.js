@@ -139,8 +139,8 @@ ipcMain.handle("profiles:delete", (event, id) => {
 
 ipcMain.handle("profiles:switch", async (event, id) => {
   profileManager.setActiveProfile(id);
-  // Recreate all views with new profile partition
-  recreateViews();
+  // Recreate all views with new profile partition, show mail after switch
+  recreateViews('mail');
   return true;
 });
 
@@ -414,7 +414,8 @@ function layoutViews() {
 
 // Recreate all views with new profile partition
 // Called when switching profiles to ensure complete session isolation
-function recreateViews() {
+// targetViewOverride: optional view to show after recreation (default: current view)
+function recreateViews(targetViewOverride = null) {
   if (!mainWindow) return;
 
   const currentViewName = currentView;
@@ -455,11 +456,12 @@ function recreateViews() {
   }
   
   // Check if current view is enabled, if not switch to first enabled app
-  let targetView = currentViewName;
-  if (currentViewName !== 'settings' && !enabledApps.includes(currentViewName)) {
-    // Current view is disabled, switch to first enabled app
+  // Use override if provided (e.g., when switching profiles)
+  let targetView = targetViewOverride || currentViewName;
+  if (targetView !== 'settings' && !enabledApps.includes(targetView)) {
+    // Target view is disabled, switch to first enabled app
     targetView = enabledApps[0] || 'mail';
-    console.log(`Current view ${currentViewName} is disabled, switching to ${targetView}`);
+    console.log(`Target view ${targetView} is disabled, switching to ${targetView}`);
   }
 
   // Re-show target view
@@ -469,8 +471,9 @@ function recreateViews() {
 
   layoutViews();
   
-  // Update sidebar with new profile
+  // Update sidebar with new profile and active view
   notifySidebarProfileUpdate();
+  views.sidebar.webContents.send("sidebar-set-active", targetView);
   
   // Refresh menu to update profile checkmarks
   createMenu();
