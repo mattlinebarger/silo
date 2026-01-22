@@ -1,6 +1,6 @@
 {
   "name": "silo",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Silo is a desktop application wrapper for Google services like Gmail and Google Calendar.",
   "main": "src/main/main.js",
   "scripts": {
