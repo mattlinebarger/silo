@@ -49,24 +49,10 @@ const menuIcons = {
   reload: loadMenuIcon("reload"),
 };
 
-// Security: whitelist of allowed Google domains
+// Security: whitelist of allowed Google domains for logging in/SSO
 // Any navigation/window.open to external URLs opens in default browser
 // Update this list when adding new Google services
 const INTERNAL_DOMAINS = [
-  "mail.google.com",
-  "calendar.google.com",
-  "drive.google.com",
-  "gemini.google.com",
-  "keep.google.com",
-  "tasks.google.com",
-  "contacts.google.com",
-  "accounts.google.com",      // Required for Google login/auth
-  "myaccount.google.com",     // Account management
-  "docs.google.com",          // Google Docs, Sheets, Slides
-  "sheets.google.com",
-  "slides.google.com",
-  "forms.google.com",
-  "google.com",                // General Google services
   "login.microsoftonline.com", // Microsoft Entra
   "microsoft.com",             // Microsoft services
   "okta.com",                  // Okta authentication
@@ -78,6 +64,82 @@ const INTERNAL_DOMAINS = [
   "windows.net",               // Azure services
   "sentry.io",                 // Sentry error tracking
 ];
+
+// Google app domains that should prompt user for open location
+const GOOGLE_APP_DOMAINS = [
+  "mail.google.com",
+  "calendar.google.com",
+  "drive.google.com",
+  "docs.google.com",
+  "sheets.google.com",
+  "slides.google.com",
+  "gemini.google.com",
+  "keep.google.com",
+  "tasks.google.com",
+  "contacts.google.com",
+  "accounts.google.com",
+  "myaccount.google.com",
+];
+
+// Check if URL is a Google app domain that should prompt user
+// Also handles Google redirect URLs (www.google.com/url?q=...)
+function isGoogleAppUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname;
+    
+    // Handle Google redirect URLs - check the actual destination
+    if ((hostname === 'www.google.com' || hostname === 'google.com') && urlObj.pathname === '/url') {
+      const actualUrl = urlObj.searchParams.get('q');
+      if (actualUrl) {
+        return isGoogleAppUrl(actualUrl);
+      }
+    }
+    
+    return GOOGLE_APP_DOMAINS.some((domain) => hostname === domain);
+  } catch {
+    return false;
+  }
+}
+
+// Extract the actual URL from a Google redirect URL, or return the original
+function resolveGoogleRedirect(url) {
+  try {
+    const urlObj = new URL(url);
+    if ((urlObj.hostname === 'www.google.com' || urlObj.hostname === 'google.com') && urlObj.pathname === '/url') {
+      const actualUrl = urlObj.searchParams.get('q');
+      if (actualUrl) {
+        return actualUrl;
+      }
+    }
+  } catch {}
+  return url;
+}
+
+// Show dialog asking user where to open Google app URL
+async function promptOpenLocation(url) {
+  // Resolve Google redirect to show/use the actual destination
+  const resolvedUrl = resolveGoogleRedirect(url);
+  
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['New Window', 'Default Browser', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    title: 'Open Link',
+    message: 'Where would you like to open this link?',
+    detail: resolvedUrl,
+  });
+  
+  if (result.response === 0) {
+    // New Window
+    openCreateWindow(resolvedUrl);
+  } else if (result.response === 1) {
+    // Default Browser
+    shell.openExternal(resolvedUrl);
+  }
+  // Cancel does nothing
+}
 
 function isInternalUrl(url) {
   try {
@@ -92,6 +154,11 @@ function isInternalUrl(url) {
         // Recursively check the actual destination URL
         return isInternalUrl(actualUrl);
       }
+    }
+    
+    // Allow google.com domains for auth flows and app navigation
+    if (hostname.endsWith('google.com')) {
+      return true;
     }
     
     return INTERNAL_DOMAINS.some((domain) => hostname.endsWith(domain));
@@ -188,8 +255,15 @@ function createContentView(key, partition = null) {
   });
 
   // Security: Intercept window.open() calls
-  // Allow internal Google domains, open everything else in default browser
+  // Google app URLs prompt user, other internal URLs open in new window, external opens in browser
   view.webContents.setWindowOpenHandler(({ url }) => {
+    // Google app URLs prompt user for choice
+    if (isGoogleAppUrl(url)) {
+      promptOpenLocation(url);
+      return { action: "deny" };
+    }
+    
+    // Other internal URLs (SSO, etc.) are allowed to open
     if (isInternalUrl(url)) {
       return { action: "allow" };
     }
@@ -197,24 +271,121 @@ function createContentView(key, partition = null) {
     shell.openExternal(url);
     return { action: "deny" };
   });
+  
+  // Handle new windows that were allowed to open
+  view.webContents.on("did-create-window", (newWindow, details) => {
+    // If a Google app URL somehow got through, close it and prompt
+    if (isGoogleAppUrl(details.url)) {
+      newWindow.close();
+      promptOpenLocation(details.url);
+      return;
+    }
+    
+    // External URLs should open in browser
+    if (!isInternalUrl(details.url)) {
+      newWindow.close();
+      shell.openExternal(details.url);
+    }
+  });
+
+  // Right-click context menu
+  view.webContents.on('context-menu', (event, params) => {
+    const { Menu, MenuItem, clipboard } = require('electron');
+    const menu = new Menu();
+    
+    // Add link options if right-clicked on a link
+    if (params.linkURL) {
+      if (isGoogleAppUrl(params.linkURL)) {
+        // Google app URLs get choice of new window or browser
+        menu.append(new MenuItem({
+          label: 'Open in New Window',
+          click: () => openCreateWindow(params.linkURL)
+        }));
+        menu.append(new MenuItem({
+          label: 'Open in Browser',
+          click: () => shell.openExternal(params.linkURL)
+        }));
+      } else if (isInternalUrl(params.linkURL)) {
+        menu.append(new MenuItem({
+          label: 'Open Link',
+          click: () => view.webContents.loadURL(params.linkURL)
+        }));
+      } else {
+        menu.append(new MenuItem({
+          label: 'Open Link in Browser',
+          click: () => shell.openExternal(params.linkURL)
+        }));
+      }
+      
+      menu.append(new MenuItem({
+        label: 'Copy Link',
+        click: () => clipboard.writeText(params.linkURL)
+      }));
+      menu.append(new MenuItem({ type: 'separator' }));
+    }
+    
+    // Text selection options
+    if (params.selectionText) {
+      menu.append(new MenuItem({
+        label: 'Copy',
+        role: 'copy'
+      }));
+      menu.append(new MenuItem({ type: 'separator' }));
+    }
+    
+    // Editable field options
+    if (params.isEditable) {
+      menu.append(new MenuItem({ label: 'Cut', role: 'cut' }));
+      menu.append(new MenuItem({ label: 'Copy', role: 'copy' }));
+      menu.append(new MenuItem({ label: 'Paste', role: 'paste' }));
+      menu.append(new MenuItem({ type: 'separator' }));
+    }
+    
+    // Always show navigation options
+    menu.append(new MenuItem({
+      label: 'Back',
+      enabled: view.webContents.canGoBack(),
+      click: () => view.webContents.goBack()
+    }));
+    menu.append(new MenuItem({
+      label: 'Forward',
+      enabled: view.webContents.canGoForward(),
+      click: () => view.webContents.goForward()
+    }));
+    menu.append(new MenuItem({
+      label: 'Reload',
+      click: () => view.webContents.reload()
+    }));
+    
+    menu.popup();
+  });
 
   // Security: Intercept navigation attempts (clicking links, redirects)
-  // Prevents external navigation, forces external URLs to open in default browser
+  // Google app URLs prompt user, external URLs open in default browser
   view.webContents.on("will-navigate", (event, url) => {
+    // Google app URLs should prompt user (except when navigating within the same app)
+    if (isGoogleAppUrl(url)) {
+      // Check if we're already on this Google app - allow navigation within same app
+      try {
+        const currentHost = new URL(view.webContents.getURL()).hostname;
+        const targetHost = new URL(url).hostname;
+        if (currentHost === targetHost) {
+          return; // Same app, allow navigation
+        }
+      } catch {}
+      
+      // Different Google app - prompt user
+      event.preventDefault();
+      promptOpenLocation(url);
+      return;
+    }
+    
     if (isInternalUrl(url)) {
       return;
     }
 
     event.preventDefault();
     shell.openExternal(url);
-  });
-  
-  // Handle links that try to navigate within frames (like email content)
-  view.webContents.on("did-create-window", (window, details) => {
-    if (!isInternalUrl(details.url)) {
-      window.close();
-      shell.openExternal(details.url);
-    }
   });
 
   // Sync sessions: When user completes login, restart window to sync all views
@@ -520,6 +691,10 @@ function showView(name) {
 // Open compose/create actions in separate window (not BrowserView)
 // Used for: new email, calendar events, docs, etc.
 function openCreateWindow(url) {
+  // Use same session partition as current profile for consistent login state
+  const activeProfile = profileManager.getActiveProfile();
+  const partition = profileManager.getPartitionName(activeProfile.id);
+  
   const win = new BrowserWindow({
     width: 900,
     height: 700,
@@ -527,7 +702,7 @@ function openCreateWindow(url) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, "preload.js"),
+      partition: partition,
     },
   });
 
