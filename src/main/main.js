@@ -58,6 +58,8 @@ const INTERNAL_DOMAINS = [
   "okta.com",                  // Okta authentication
   "oktacdn.com",               // Okta CDN resources
   "oktapreview.com",           // Okta preview environments
+  "duofederal.com",            // Duo Federal authentication
+  "duosecurity.com",           // Duo auth and static assets
   "msauth.net",                // Microsoft authentication
   "live.com",                  // Microsoft Live services
   "microsoftonline.com",       // Microsoft Online services
