@@ -85,10 +85,18 @@ const GOOGLE_APP_DOMAINS = [
 
 // Check if URL is a Google app domain that should prompt user
 // Also handles Google redirect URLs (www.google.com/url?q=...)
+// Excludes authentication intermediate pages (e.g., /a/domain/acs)
 function isGoogleAppUrl(url) {
   try {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname;
+    const pathname = urlObj.pathname;
+    
+    // Exclude authentication intermediate pages (Assertion Consumer Service)
+    // These are part of SSO flow and should navigate automatically
+    if (pathname.includes('/acs') || pathname.includes('/ServiceLogin') || pathname.includes('/CheckCookie')) {
+      return false;
+    }
     
     // Handle Google redirect URLs - check the actual destination
     if ((hostname === 'www.google.com' || hostname === 'google.com') && urlObj.pathname === '/url') {
