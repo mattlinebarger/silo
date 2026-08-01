@@ -24,6 +24,13 @@ let lastSessionSyncAt = 0; // Debounce so reloaded views can't re-trigger a sync
 
 const isMac = process.platform === "darwin";
 
+// Google refuses sign-in from embedded browsers ("Couldn't sign you in /
+// browser doesn't support JavaScript") based on user-agent sniffing.
+// Strip the Electron and app tokens so we present as plain Chrome.
+app.userAgentFallback = app.userAgentFallback
+  .replace(/\sElectron\/\S+/i, "")
+  .replace(/\ssilo\/\S+/i, "");
+
 const VIEW_URLS = {
   mail: "https://mail.google.com",
   calendar: "https://calendar.google.com",
