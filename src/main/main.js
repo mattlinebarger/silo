@@ -1,10 +1,12 @@
 const {
   app,
   BrowserWindow,
-  BrowserView,
+  WebContentsView,
   Menu,
-  ipcMain,
+  MenuItem,
   Notification,
+  clipboard,
+  ipcMain,
   shell,
   nativeImage,
   dialog,
@@ -12,16 +14,24 @@ const {
 const path = require("path");
 const ProfileManager = require("./profile-manager");
 
-// Global state: single window with multiple persistent BrowserViews
-// Each Google app lives in its own BrowserView (not tab/separate window)
+// Global state: single window with multiple persistent WebContentsViews
+// Each Google app lives in its own WebContentsView (not tab/separate window)
 // Views persist in memory even when hidden - maintains state between switches
 let mainWindow = null;
-let views = {}; // Registry of all BrowserViews keyed by name (mail, calendar, etc.)
+let views = {}; // Registry of all WebContentsViews keyed by name (mail, calendar, etc.)
 let currentView = "mail"; // Tracks which content view is currently visible
 let profileManager = null; // Profile manager instance
-let globalRestartScheduled = false; // Prevent multiple views from scheduling restart simultaneously
+let lastSessionSyncAt = 0; // Debounce so reloaded views can't re-trigger a sync loop
+let pendingMailtoUrl = null; // mailto: link received before the app finished launching
 
 const isMac = process.platform === "darwin";
+
+// Google refuses sign-in from embedded browsers ("Couldn't sign you in /
+// browser doesn't support JavaScript") based on user-agent sniffing.
+// Strip the Electron and app tokens so we present as plain Chrome.
+app.userAgentFallback = app.userAgentFallback
+  .replace(/\sElectron\/\S+/i, "")
+  .replace(/\ssilo\/\S+/i, "");
 
 const VIEW_URLS = {
   mail: "https://mail.google.com",
@@ -49,9 +59,9 @@ const menuIcons = {
   reload: loadMenuIcon("reload"),
 };
 
-// Security: whitelist of allowed Google domains for logging in/SSO
+// Security: whitelist of allowed domains for logging in/SSO
 // Any navigation/window.open to external URLs opens in default browser
-// Update this list when adding new Google services
+// Update this list when adding new auth providers
 const INTERNAL_DOMAINS = [
   "login.microsoftonline.com", // Microsoft Entra
   "microsoft.com",             // Microsoft services
@@ -83,6 +93,12 @@ const GOOGLE_APP_DOMAINS = [
   "myaccount.google.com",
 ];
 
+// Strict domain match: exact hostname or a true subdomain.
+// Prevents spoofing like "evilmicrosoft.com" matching "microsoft.com"
+function matchesDomain(hostname, domain) {
+  return hostname === domain || hostname.endsWith("." + domain);
+}
+
 // Check if URL is a Google app domain that should prompt user
 // Also handles Google redirect URLs (www.google.com/url?q=...)
 // Excludes authentication intermediate pages (e.g., /a/domain/acs)
@@ -91,13 +107,13 @@ function isGoogleAppUrl(url) {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname;
     const pathname = urlObj.pathname;
-    
+
     // Exclude authentication intermediate pages (Assertion Consumer Service)
     // These are part of SSO flow and should navigate automatically
     if (pathname.includes('/acs') || pathname.includes('/ServiceLogin') || pathname.includes('/CheckCookie')) {
       return false;
     }
-    
+
     // Handle Google redirect URLs - check the actual destination
     if ((hostname === 'www.google.com' || hostname === 'google.com') && urlObj.pathname === '/url') {
       const actualUrl = urlObj.searchParams.get('q');
@@ -105,7 +121,7 @@ function isGoogleAppUrl(url) {
         return isGoogleAppUrl(actualUrl);
       }
     }
-    
+
     return GOOGLE_APP_DOMAINS.some((domain) => hostname === domain);
   } catch {
     return false;
@@ -130,8 +146,8 @@ function resolveGoogleRedirect(url) {
 async function promptOpenLocation(url) {
   // Resolve Google redirect to show/use the actual destination
   const resolvedUrl = resolveGoogleRedirect(url);
-  
-  const result = await dialog.showMessageBox(mainWindow, {
+
+  const options = {
     type: 'question',
     buttons: ['New Window', 'Default Browser', 'Cancel'],
     defaultId: 0,
@@ -139,8 +155,12 @@ async function promptOpenLocation(url) {
     title: 'Open Link',
     message: 'Where would you like to open this link?',
     detail: resolvedUrl,
-  });
-  
+  };
+
+  const result = mainWindow
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+
   if (result.response === 0) {
     // New Window
     openCreateWindow(resolvedUrl);
@@ -155,44 +175,107 @@ function isInternalUrl(url) {
   try {
     const urlObj = new URL(url);
     const { hostname, searchParams } = urlObj;
-    
+
     // Handle Google's redirect URLs (e.g., google.com/url?q=actual-url)
     // Extract the real destination URL and check that instead
-    if (hostname.endsWith('google.com') && urlObj.pathname === '/url') {
+    if (matchesDomain(hostname, 'google.com') && urlObj.pathname === '/url') {
       const actualUrl = searchParams.get('q');
       if (actualUrl) {
         // Recursively check the actual destination URL
         return isInternalUrl(actualUrl);
       }
     }
-    
+
     // Allow google.com domains for auth flows and app navigation
-    if (hostname.endsWith('google.com')) {
+    if (matchesDomain(hostname, 'google.com')) {
       return true;
     }
-    
-    return INTERNAL_DOMAINS.some((domain) => hostname.endsWith(domain));
+
+    return INTERNAL_DOMAINS.some((domain) => matchesDomain(hostname, domain));
   } catch {
     return false;
   }
 }
 
 // IPC: Update macOS dock badge with unread count from Gmail
-// Triggered by preload script monitoring Gmail's DOM/API
+// Triggered by preload script watching Gmail's document title
 ipcMain.on("unread-count", (event, count) => {
+  const n = Number(count);
+  const unread = Number.isFinite(n) && n > 0 ? n : 0;
   if (isMac && app.dock) {
-    app.dock.setBadge(count > 0 ? String(count) : "");
+    app.dock.setBadge(unread > 0 ? String(unread) : "");
+  }
+  // Mirror the count as a dot on the sidebar's mail icon
+  if (views.sidebar && !views.sidebar.webContents.isDestroyed()) {
+    views.sidebar.webContents.send("sidebar-unread", unread);
   }
 });
 
-// IPC: Show native notifications from Google apps
-ipcMain.on("notify", (event, { title, options }) => {
-  new Notification({
-    title,
-    body: options?.body || "",
-    silent: false,
-  }).show();
+// Convert a mailto: URL into a Gmail compose URL
+// Supports to, subject, body, cc, bcc
+function mailtoToComposeUrl(mailtoUrl) {
+  try {
+    const u = new URL(mailtoUrl);
+    if (u.protocol !== "mailto:") return null;
+    const compose = new URL("https://mail.google.com/mail/");
+    compose.searchParams.set("view", "cm");
+    compose.searchParams.set("fs", "1");
+    const to = decodeURIComponent(u.pathname || "");
+    if (to) compose.searchParams.set("to", to);
+    const paramMap = { subject: "su", body: "body", cc: "cc", bcc: "bcc" };
+    for (const [from, target] of Object.entries(paramMap)) {
+      const value = u.searchParams.get(from);
+      if (value) compose.searchParams.set(target, value);
+    }
+    return compose.toString();
+  } catch {
+    return null;
+  }
+}
+
+// macOS delivers mailto: links (Silo is registered for the scheme in
+// package.json build config) via open-url, which can fire before ready
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  const composeUrl = mailtoToComposeUrl(url);
+  if (!composeUrl) return;
+  if (profileManager) {
+    openCreateWindow(composeUrl);
+  } else {
+    pendingMailtoUrl = composeUrl;
+  }
 });
+
+// Download handling: dock progress bar while downloading, notification with
+// "reveal in Finder" on completion. Attached once per session (profiles have
+// their own partitions, so there can be several).
+const downloadHandledSessions = new WeakSet();
+function setupDownloads(sess) {
+  if (downloadHandledSessions.has(sess)) return;
+  downloadHandledSessions.add(sess);
+
+  sess.on("will-download", (event, item) => {
+    item.on("updated", () => {
+      if (mainWindow && !mainWindow.isDestroyed() && item.getTotalBytes() > 0) {
+        mainWindow.setProgressBar(item.getReceivedBytes() / item.getTotalBytes());
+      }
+    });
+    item.once("done", (e, state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+      if (state === "completed") {
+        const savePath = item.getSavePath();
+        const notification = new Notification({
+          title: "Download complete",
+          body: path.basename(savePath),
+        });
+        notification.on("click", () => shell.showItemInFolder(savePath));
+        notification.show();
+      }
+    });
+  });
+}
 
 // Profile IPC handlers
 ipcMain.handle("profiles:get-all", () => {
@@ -202,12 +285,27 @@ ipcMain.handle("profiles:get-all", () => {
   };
 });
 
+// Only accept known profile fields from the renderer
+function sanitizeProfileInput(data) {
+  const allowed = {};
+  if (typeof data?.name === "string") allowed.name = data.name;
+  if (typeof data?.avatarPath === "string" || data?.avatarPath === null) {
+    allowed.avatarPath = data.avatarPath;
+  }
+  if (Array.isArray(data?.enabledApps)) {
+    allowed.enabledApps = data.enabledApps.filter(
+      (a) => typeof a === "string" && a in VIEW_URLS && a !== "settings"
+    );
+  }
+  return allowed;
+}
+
 ipcMain.handle("profiles:create", (event, data) => {
-  return profileManager.createProfile(data);
+  return profileManager.createProfile(sanitizeProfileInput(data));
 });
 
 ipcMain.handle("profiles:update", (event, { id, updates }) => {
-  return profileManager.updateProfile(id, updates);
+  return profileManager.updateProfile(id, sanitizeProfileInput(updates));
 });
 
 ipcMain.handle("profiles:delete", (event, id) => {
@@ -229,7 +327,7 @@ ipcMain.handle("profiles:select-avatar", async () => {
     ],
     title: 'Select Profile Picture'
   });
-  
+
   if (!result.canceled && result.filePaths.length > 0) {
     return result.filePaths[0];
   }
@@ -242,9 +340,62 @@ ipcMain.handle("sidebar-get-active-profile", () => {
 });
 
 function notifySidebarProfileUpdate() {
-  if (views.sidebar && views.sidebar.webContents) {
+  if (views.sidebar && !views.sidebar.webContents.isDestroyed()) {
     const activeProfile = profileManager.getActiveProfile();
     views.sidebar.webContents.send("sidebar-profile-update", activeProfile);
+  }
+}
+
+// Shared link policy for windows the app opens (popups allowed by the
+// window-open handler and compose/create windows). Without these guards a
+// popup could be navigated anywhere while still looking like part of the app.
+function attachWindowGuards(win) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isGoogleAppUrl(url)) {
+      promptOpenLocation(url);
+      return { action: "deny" };
+    }
+    if (isInternalUrl(url)) {
+      return { action: "allow" };
+    }
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  win.webContents.on("will-navigate", (event, url) => {
+    if (isInternalUrl(url)) return;
+    event.preventDefault();
+    shell.openExternal(url);
+  });
+
+  win.webContents.on("did-create-window", (newWindow, details) => {
+    if (!isInternalUrl(details.url)) {
+      newWindow.close();
+      shell.openExternal(details.url);
+      return;
+    }
+    attachWindowGuards(newWindow);
+  });
+}
+
+// Session sync: when a login completes in one view, reload the other views so
+// they pick up the fresh cookies from the shared partition. Replaces the old
+// approach of destroying and recreating the entire window on a timer.
+function syncSessionsFrom(sourceKey) {
+  const now = Date.now();
+  // Reloaded views can briefly pass through accounts.google.com themselves;
+  // the cooldown prevents them from re-triggering a sync loop
+  if (now - lastSessionSyncAt < 30000) return;
+  lastSessionSyncAt = now;
+
+  console.log(`[Session Sync] Login detected in "${sourceKey}", reloading other views`);
+
+  for (const key of Object.keys(VIEW_URLS)) {
+    if (key === sourceKey || key === "settings") continue;
+    const view = views[key];
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.loadURL(VIEW_URLS[key]);
+    }
   }
 }
 
@@ -260,7 +411,7 @@ function createContentView(key, partition = null) {
     webPreferences.partition = partition;
   }
 
-  const view = new BrowserView({
+  const view = new WebContentsView({
     webPreferences,
   });
 
@@ -272,7 +423,7 @@ function createContentView(key, partition = null) {
       promptOpenLocation(url);
       return { action: "deny" };
     }
-    
+
     // Other internal URLs (SSO, etc.) are allowed to open
     if (isInternalUrl(url)) {
       return { action: "allow" };
@@ -281,7 +432,7 @@ function createContentView(key, partition = null) {
     shell.openExternal(url);
     return { action: "deny" };
   });
-  
+
   // Handle new windows that were allowed to open
   view.webContents.on("did-create-window", (newWindow, details) => {
     // If a Google app URL somehow got through, close it and prompt
@@ -290,19 +441,37 @@ function createContentView(key, partition = null) {
       promptOpenLocation(details.url);
       return;
     }
-    
+
     // External URLs should open in browser
     if (!isInternalUrl(details.url)) {
       newWindow.close();
       shell.openExternal(details.url);
+      return;
     }
+
+    // Allowed popups (SSO windows, etc.) get the same link policy
+    attachWindowGuards(newWindow);
   });
 
   // Right-click context menu
   view.webContents.on('context-menu', (event, params) => {
-    const { Menu, MenuItem, clipboard } = require('electron');
     const menu = new Menu();
-    
+
+    // Spelling suggestions for misspelled words in editable fields
+    if (params.misspelledWord) {
+      for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+        menu.append(new MenuItem({
+          label: suggestion,
+          click: () => view.webContents.replaceMisspelling(suggestion)
+        }));
+      }
+      menu.append(new MenuItem({
+        label: 'Add to Dictionary',
+        click: () => view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord)
+      }));
+      menu.append(new MenuItem({ type: 'separator' }));
+    }
+
     // Add link options if right-clicked on a link
     if (params.linkURL) {
       if (isGoogleAppUrl(params.linkURL)) {
@@ -326,14 +495,14 @@ function createContentView(key, partition = null) {
           click: () => shell.openExternal(params.linkURL)
         }));
       }
-      
+
       menu.append(new MenuItem({
         label: 'Copy Link',
         click: () => clipboard.writeText(params.linkURL)
       }));
       menu.append(new MenuItem({ type: 'separator' }));
     }
-    
+
     // Text selection options
     if (params.selectionText) {
       menu.append(new MenuItem({
@@ -342,7 +511,7 @@ function createContentView(key, partition = null) {
       }));
       menu.append(new MenuItem({ type: 'separator' }));
     }
-    
+
     // Editable field options
     if (params.isEditable) {
       menu.append(new MenuItem({ label: 'Cut', role: 'cut' }));
@@ -350,23 +519,23 @@ function createContentView(key, partition = null) {
       menu.append(new MenuItem({ label: 'Paste', role: 'paste' }));
       menu.append(new MenuItem({ type: 'separator' }));
     }
-    
+
     // Always show navigation options
     menu.append(new MenuItem({
       label: 'Back',
-      enabled: view.webContents.canGoBack(),
-      click: () => view.webContents.goBack()
+      enabled: view.webContents.navigationHistory.canGoBack(),
+      click: () => view.webContents.navigationHistory.goBack()
     }));
     menu.append(new MenuItem({
       label: 'Forward',
-      enabled: view.webContents.canGoForward(),
-      click: () => view.webContents.goForward()
+      enabled: view.webContents.navigationHistory.canGoForward(),
+      click: () => view.webContents.navigationHistory.goForward()
     }));
     menu.append(new MenuItem({
       label: 'Reload',
       click: () => view.webContents.reload()
     }));
-    
+
     menu.popup();
   });
 
@@ -383,13 +552,13 @@ function createContentView(key, partition = null) {
           return; // Same app, allow navigation
         }
       } catch {}
-      
+
       // Different Google app - prompt user
       event.preventDefault();
       promptOpenLocation(url);
       return;
     }
-    
+
     if (isInternalUrl(url)) {
       return;
     }
@@ -398,12 +567,12 @@ function createContentView(key, partition = null) {
     shell.openExternal(url);
   });
 
-  // Sync sessions: When user completes login, restart window to sync all views
-  // Detects navigation from accounts.google.com back to app domain
+  // Detect login completion: user visits accounts.google.com (login form),
+  // then lands on a real Google app page. Server-side redirects during a
+  // normal signed-in load don't fire did-start-loading on the accounts URL,
+  // so this only triggers on actual interactive logins.
   let wasOnAccountsPage = false;
-  let hasTriggeredRestart = false; // Prevent multiple restarts
-  let loginCheckTimer = null; // Timer for delayed login detection
-  
+
   view.webContents.on("did-start-loading", () => {
     try {
       const url = view.webContents.getURL();
@@ -411,7 +580,7 @@ function createContentView(key, partition = null) {
         wasOnAccountsPage = true;
       } else if (url && wasOnAccountsPage && !isInternalUrl(url)) {
         // Reset if we navigate to an external domain (like Okta)
-        // This prevents triggering restart after external auth flows
+        // This prevents triggering sync after external auth flows
         wasOnAccountsPage = false;
       }
     } catch (e) {
@@ -423,21 +592,14 @@ function createContentView(key, partition = null) {
     try {
       const url = view.webContents.getURL();
       if (!url) return;
-      
-      const hostname = new URL(url).hostname;
-      const pathname = new URL(url).pathname;
-      
+
+      const { hostname, pathname } = new URL(url);
+
       // Check if we're on an actual Google app page (not just accounts or generic google.com)
-      const isOnGoogleApp = (
-        hostname === 'mail.google.com' ||
-        hostname === 'calendar.google.com' ||
-        hostname === 'drive.google.com' ||
-        hostname === 'keep.google.com' ||
-        hostname === 'tasks.google.com' ||
-        hostname === 'contacts.google.com' ||
-        hostname === 'gemini.google.com'
-      );
-      
+      const isOnGoogleApp = Object.keys(VIEW_URLS)
+        .filter((k) => k !== "settings")
+        .some((k) => hostname === new URL(VIEW_URLS[k]).hostname);
+
       // Skip intermediate pages like /a/domain/acs (Assertion Consumer Service)
       // These are part of the SSO flow, not the final destination
       const isIntermediatePage = (
@@ -445,134 +607,56 @@ function createContentView(key, partition = null) {
         pathname.includes('/a/') ||
         hostname === 'www.google.com'
       );
-      
-      // If we just left accounts page and are now on an actual Google app, login completed
-      // Only trigger if coming from Google accounts (not external SSO providers)
-      // AND we're on a real app page (not intermediate redirect)
-      // AND no restart has been scheduled globally
-      if (wasOnAccountsPage && !hasTriggeredRestart && !globalRestartScheduled && isOnGoogleApp && !isIntermediatePage) {
-        hasTriggeredRestart = true;
-        globalRestartScheduled = true;
+
+      if (wasOnAccountsPage && isOnGoogleApp && !isIntermediatePage) {
         wasOnAccountsPage = false;
-        
-        // Try to fetch Google profile picture from Gmail after page fully loads
-        if (key === 'mail') {
-          setTimeout(() => {
-            // Check if view still exists and is not destroyed
-            const mailView = views['mail'];
-            if (!mailView || mailView.webContents.isDestroyed()) {
-              return;
-            }
-            mailView.webContents.executeJavaScript(`
-              (function() {
-                console.log('[Profile Debug] Starting profile picture search...');
-                
-                function getBestImageUrl(img) {
-                  if (!img) return null;
-                  const srcset = img.getAttribute('srcset') || img.srcset;
-                  if (srcset) {
-                    const srcsetParts = srcset.split(',').map(s => s.trim());
-                    const lastPart = srcsetParts[srcsetParts.length - 1];
-                    return lastPart.split(' ')[0];
-                  }
-                  return img.src;
-                }
-
-                function isValidProfileUrl(url) {
-                  if (!url) return false;
-                  if (url.includes('/icons/') || 
-                      url.includes('google_workspace') ||
-                      url.includes('logo') ||
-                      url.includes('branding') ||
-                      url.includes('avatar_anonymous')) {
-                    return false;
-                  }
-                  return url.includes('googleusercontent') || 
-                         url.includes('ggpht.com') || 
-                         url.match(/lh[3-6]\\.google\\.com/);
-                }
-                
-                const selectors = [
-                  'button[aria-label*="Google Account"] img',
-                  'a[aria-label*="Google Account"] img',
-                  'img[aria-label="Google Account"]',
-                  'a[href*="accounts.google.com"] img',
-                  'a[href^="https://accounts.google.com/SignOutOptions"] img',
-                  '[data-testid="profile-image"]',
-                  'a[aria-label*="profile"] img',
-                  'header img',
-                  'div[role="banner"] img'
-                ];
-                
-                // 1. Try Selectors
-                for (const selector of selectors) {
-                  const elements = document.querySelectorAll(selector);
-                  for (const img of elements) {
-                    const url = getBestImageUrl(img);
-                    if (url && isValidProfileUrl(url)) {
-                       const rect = img.getBoundingClientRect();
-                       if (rect.width > 20 && rect.height > 20 && Math.abs(rect.width - rect.height) < 10) {
-                          let finalUrl = url.replace(/=s\\d+-/g, '=s192-').replace(/\\/s\\d+-/g, '/s192-');
-                          return { success: true, selector, url: finalUrl, method: 'selector' };
-                       }
-                    }
-                  }
-                }
-                
-                // 2. Positional Fallback (Top Right)
-                const allImages = document.querySelectorAll('img');
-                for (const img of allImages) {
-                   const rect = img.getBoundingClientRect();
-                   if (rect.top < 100 && rect.right > window.innerWidth - 150 && 
-                       rect.width > 28 && rect.height > 28 && 
-                       Math.abs(rect.width - rect.height) < 10) {
-                       
-                       const url = getBestImageUrl(img);
-                       if (url && isValidProfileUrl(url)) {
-                           let finalUrl = url.replace(/=s\\d+-/g, '=s192-').replace(/\\/s\\d+-/g, '/s192-');
-                           return { success: true, selector: 'positional', url: finalUrl, method: 'positional' };
-                       }
-                   }
-                }
-
-                return { success: false };
-              })();
-            `).then(result => {
-              if (result.success && result.url) {
-                const activeProfile = profileManager.getActiveProfile();
-                if (activeProfile && !activeProfile.isDefault) {
-                  profileManager.updateProfile(activeProfile.id, { avatarUrl: result.url });
-                }
-              }
-            }).catch(e => console.error('Error fetching profile picture:', e));
-          }, 6000); // Longer delay to ensure Gmail UI is fully loaded
-        }
-        
-        // Restart window after longer delay to ensure auth flow is completely done
-        // This gives time for all redirects to complete
-        setTimeout(() => {
-          restartMainWindow();
-          // Reset global flag after restart completes
-          setTimeout(() => {
-            globalRestartScheduled = false;
-          }, 2000);
-        }, 3000); // Increased from 1000ms to 3000ms
+        syncSessionsFrom(key);
       }
     } catch (e) {
       console.error("Error in session sync:", e);
     }
   });
 
+  setupDownloads(view.webContents.session);
   view.webContents.loadURL(VIEW_URLS[key]);
   return view;
 }
 
-// Layout: Position BrowserViews using explicit bounds (CSS doesn't work on BrowserViews)
+// Lazy loading: views are created on first visit and kept alive afterwards.
+// Keeps startup light (one renderer instead of eight) while preserving
+// instant switching between already-visited apps.
+function ensureView(key) {
+  if (views[key] && !views[key].webContents.isDestroyed()) {
+    return views[key];
+  }
+  if (key === "settings") {
+    views[key] = createSettingsView();
+  } else {
+    const activeProfile = profileManager.getActiveProfile();
+    const partition = profileManager.getPartitionName(activeProfile.id);
+    views[key] = createContentView(key, partition);
+  }
+  return views[key];
+}
+
+function createSettingsView() {
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/settings-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  view.webContents.loadURL(VIEW_URLS.settings);
+  return view;
+}
+
+// Layout: Position views using explicit bounds (CSS doesn't work on WebContentsViews)
 // Sidebar: Fixed 60px width at x:0
 // Content: Fills remaining width starting at x:60
 // Called on window resize to maintain layout
 function layoutViews() {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
 
   const bounds = mainWindow.getContentBounds();
   const sidebarWidth = 60;
@@ -597,100 +681,85 @@ function layoutViews() {
 // Called when switching profiles to ensure complete session isolation
 // targetViewOverride: optional view to show after recreation (default: current view)
 function recreateViews(targetViewOverride = null) {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  const currentViewName = currentView;
+  const previousView = currentView;
 
-  // Remove all views from window
-  for (const key of Object.keys(VIEW_URLS)) {
-    if (views[key]) {
-      try {
-        mainWindow.removeBrowserView(views[key]);
-        // Destroy the view to clear session
-        views[key].webContents.destroy();
-      } catch (e) {
-        console.error(`Error destroying view ${key}:`, e);
-      }
+  // Remove all content views from window and close them to clear session.
+  // Views are lazy, so only the ones the user actually visited exist.
+  for (const key of Object.keys(views)) {
+    if (key === 'sidebar') continue;
+    try {
+      mainWindow.contentView.removeChildView(views[key]);
+      views[key].webContents.close();
+    } catch (e) {
+      console.error(`Error closing view ${key}:`, e);
     }
+    delete views[key];
   }
 
-  // Get new partition for active profile
   const activeProfile = profileManager.getActiveProfile();
-  const partition = profileManager.getPartitionName(activeProfile.id);
   const enabledApps = activeProfile.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
 
-  // Recreate all views with new partition
-  for (const key of Object.keys(VIEW_URLS)) {
-    // Settings view uses its own preload script
-    if (key === 'settings') {
-      views[key] = new BrowserView({
-        webPreferences: {
-          preload: path.join(__dirname, "../preload/settings-preload.js"),
-          contextIsolation: true,
-          nodeIntegration: false,
-        },
-      });
-      views[key].webContents.loadURL(VIEW_URLS[key]);
-    } else {
-      views[key] = createContentView(key, partition);
-    }
-  }
-  
   // Check if current view is enabled, if not switch to first enabled app
   // Use override if provided (e.g., when switching profiles)
-  let targetView = targetViewOverride || currentViewName;
+  let targetView = targetViewOverride || previousView;
   if (targetView !== 'settings' && !enabledApps.includes(targetView)) {
-    // Target view is disabled, switch to first enabled app
+    console.log(`View ${targetView} is disabled, switching to ${enabledApps[0] || 'mail'}`);
     targetView = enabledApps[0] || 'mail';
-    console.log(`Target view ${targetView} is disabled, switching to ${targetView}`);
   }
 
-  // Re-show target view
-  mainWindow.addBrowserView(views.sidebar);
-  mainWindow.addBrowserView(views[targetView]);
+  // Re-show target view with the new partition (sidebar added last stays on top)
+  mainWindow.contentView.addChildView(ensureView(targetView));
+  mainWindow.contentView.addChildView(views.sidebar);
   currentView = targetView;
 
   layoutViews();
-  
+
   // Update sidebar with new profile and active view
   notifySidebarProfileUpdate();
   views.sidebar.webContents.send("sidebar-set-active", targetView);
-  
+
   // Refresh menu to update profile checkmarks
   createMenu();
 }
 
 
-// View switching: Remove all views, then re-add sidebar + target view
+// View switching: Remove content views, then re-add target + sidebar
 // Order matters: sidebar added last stays on top (z-order)
 // Views remain in memory when removed - no state loss
 function showView(name) {
+  // Reopen the window if it was closed (macOS keeps the app alive)
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+
   // Check if view is enabled (except settings which is always available)
   if (name !== 'settings') {
     const activeProfile = profileManager.getActiveProfile();
     const enabledApps = activeProfile?.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
-    
+
     if (!enabledApps.includes(name)) {
       console.log(`View ${name} is not enabled, ignoring switch request`);
       return;
     }
   }
-  
+
   currentView = name;
 
-  // Remove all views from window (but don't destroy them)
-  for (const key of Object.keys(VIEW_URLS)) {
-    if (views[key]) {
+  // Remove all content views from window (but don't close them)
+  for (const key of Object.keys(views)) {
+    if (key !== 'sidebar') {
       try {
-        mainWindow.removeBrowserView(views[key]);
+        mainWindow.contentView.removeChildView(views[key]);
       } catch {}
     }
   }
 
-  // Re-add sidebar and target content view
+  // Re-add target content view (created on first visit) and sidebar
   // Sidebar must be added last to maintain proper z-order
-  mainWindow.addBrowserView(views.sidebar);
-  mainWindow.addBrowserView(views[name]);
+  mainWindow.contentView.addChildView(ensureView(name));
+  mainWindow.contentView.addChildView(views.sidebar);
 
   views.sidebar.webContents.send("sidebar-set-active", name);
   mainWindow.setTitle("");
@@ -698,13 +767,13 @@ function showView(name) {
   layoutViews();
 }
 
-// Open compose/create actions in separate window (not BrowserView)
+// Open compose/create actions in separate window (not a view)
 // Used for: new email, calendar events, docs, etc.
 function openCreateWindow(url) {
   // Use same session partition as current profile for consistent login state
   const activeProfile = profileManager.getActiveProfile();
   const partition = profileManager.getPartitionName(activeProfile.id);
-  
+
   const win = new BrowserWindow({
     width: 900,
     height: 700,
@@ -716,6 +785,8 @@ function openCreateWindow(url) {
     },
   });
 
+  attachWindowGuards(win);
+  setupDownloads(win.webContents.session);
   win.loadURL(url);
   win.focus();
 }
@@ -723,7 +794,7 @@ function openCreateWindow(url) {
 function buildProfilesMenu() {
   const profiles = profileManager.getProfiles();
   const activeProfile = profileManager.getActiveProfile();
-  
+
   const profileItems = profiles.map(profile => ({
     label: profile.name,
     type: 'checkbox',
@@ -735,7 +806,7 @@ function buildProfilesMenu() {
       }
     },
   }));
-  
+
   return [
     ...profileItems,
     { type: 'separator' },
@@ -749,7 +820,7 @@ function buildProfilesMenu() {
 function createMenu() {
   const activeProfile = profileManager.getActiveProfile();
   const enabledApps = activeProfile?.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
-  
+
   // Map of app keys to menu items with labels and accelerators
   const appMenuItems = {
     mail: { label: "Mail", accelerator: "Cmd+1" },
@@ -760,7 +831,7 @@ function createMenu() {
     tasks: { label: "Tasks", accelerator: "Cmd+6" },
     contacts: { label: "Contacts", accelerator: "Cmd+7" },
   };
-  
+
   // Build Switch To submenu with only enabled apps
   const switchToSubmenu = enabledApps
     .filter(app => appMenuItems[app]) // Only include valid app keys
@@ -769,7 +840,7 @@ function createMenu() {
       accelerator: appMenuItems[app].accelerator,
       click: () => showView(app),
     }));
-  
+
   const template = [
     {
       label: "Silo",
@@ -782,6 +853,14 @@ function createMenu() {
           accelerator: "Cmd+,",
           icon: menuIcons.settings,
           click: () => showView("settings"),
+        },
+        {
+          label: "Set as Default Email App",
+          enabled: !app.isDefaultProtocolClient("mailto"),
+          click: () => {
+            app.setAsDefaultProtocolClient("mailto");
+            createMenu(); // Refresh so the item greys out once set
+          },
         },
         { type: "separator" },
         { role: "hide" },
@@ -880,6 +959,22 @@ function createMenu() {
           },
         },
         { type: "separator" },
+        {
+          label: "Zoom In",
+          accelerator: "Cmd+Plus",
+          click: () => adjustZoom(+0.5),
+        },
+        {
+          label: "Zoom Out",
+          accelerator: "Cmd+-",
+          click: () => adjustZoom(-0.5),
+        },
+        {
+          label: "Actual Size",
+          accelerator: "Cmd+0",
+          click: () => adjustZoom(null),
+        },
+        { type: "separator" },
         { role: "togglefullscreen" },
       ],
     },
@@ -895,50 +990,15 @@ function createMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-function restartMainWindow() {
-  if (!mainWindow) return;
-  
-  console.log("[Session Sync] Restarting window to sync sessions...");
-  
-  // Save current view before destroying
-  const savedView = currentView;
-  
-  // Destroy all views
-  for (const key of Object.keys(VIEW_URLS)) {
-    if (views[key]) {
-      try {
-        mainWindow.removeBrowserView(views[key]);
-        views[key].webContents.destroy();
-      } catch (e) {
-        console.error(`Error destroying view ${key}:`, e);
-      }
-    }
+// Zoom applies to the currently visible view; null resets to default
+function adjustZoom(delta) {
+  const view = views[currentView];
+  if (!view || view.webContents.isDestroyed()) return;
+  if (delta === null) {
+    view.webContents.setZoomLevel(0);
+  } else {
+    view.webContents.setZoomLevel(view.webContents.getZoomLevel() + delta);
   }
-  
-  // Destroy sidebar
-  try {
-    mainWindow.removeBrowserView(views.sidebar);
-    views.sidebar.webContents.destroy();
-  } catch (e) {
-    console.error("Error destroying sidebar:", e);
-  }
-  
-  // Close and destroy the window
-  mainWindow.destroy();
-  mainWindow = null;
-  views = {};
-  
-  // Recreate window after short delay
-  setTimeout(() => {
-    createMainWindow();
-    // Restore the view user was on
-    if (savedView && VIEW_URLS[savedView]) {
-      showView(savedView);
-    }
-    // Notify sidebar of profile
-    notifySidebarProfileUpdate();
-    console.log("[Session Sync] Window restarted");
-  }, 100);
 }
 
 function createMainWindow() {
@@ -952,7 +1012,7 @@ function createMainWindow() {
     },
   });
 
-  views.sidebar = new BrowserView({
+  views.sidebar = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, "../preload/sidebar-preload.js"),
       contextIsolation: true,
@@ -962,30 +1022,10 @@ function createMainWindow() {
 
   views.sidebar.webContents.loadFile(path.join(__dirname, "../renderer/sidebar.html"));
 
-  // Create all views at startup (no lazy loading)
-  // All Google apps load in background, ready for instant switching
-  // Views use session partition based on active profile for isolation
-  const activeProfile = profileManager.getActiveProfile();
-  const partition = profileManager.getPartitionName(activeProfile.id);
-
-  for (const key of Object.keys(VIEW_URLS)) {
-    // Settings view needs its own preload script for profile management
-    if (key === 'settings') {
-      views[key] = new BrowserView({
-        webPreferences: {
-          preload: path.join(__dirname, "../preload/settings-preload.js"),
-          contextIsolation: true,
-          nodeIntegration: false,
-        },
-      });
-      views[key].webContents.loadURL(VIEW_URLS[key]);
-    } else {
-      views[key] = createContentView(key, partition);
-    }
-  }
-
-  mainWindow.addBrowserView(views.sidebar);
-  mainWindow.addBrowserView(views.mail);
+  // Only the mail view is created at startup; other apps are created lazily
+  // on first visit (ensureView) and stay alive afterwards
+  mainWindow.contentView.addChildView(ensureView("mail"));
+  mainWindow.contentView.addChildView(views.sidebar);
 
   currentView = "mail";
   views.sidebar.webContents.once("dom-ready", () => {
@@ -996,12 +1036,23 @@ function createMainWindow() {
   createMenu();
 
   mainWindow.on("resize", layoutViews);
-  
-  // Clean up listener when window is closed to prevent memory leak warnings
+
+  // WebContentsView webContents are not destroyed automatically with the
+  // window - close them explicitly and reset state so menu clicks after the
+  // window is closed (macOS) recreate a fresh window instead of crashing
   mainWindow.on("closed", () => {
-    mainWindow.removeListener("resize", layoutViews);
+    for (const key of Object.keys(views)) {
+      try {
+        if (!views[key].webContents.isDestroyed()) {
+          views[key].webContents.close();
+        }
+      } catch {}
+    }
+    views = {};
+    mainWindow = null;
+    if (isMac && app.dock) app.dock.setBadge("");
   });
-  
+
   // Initialize sidebar with current profile
   notifySidebarProfileUpdate();
 }
@@ -1016,6 +1067,12 @@ app.whenReady().then(async () => {
   profileManager = new ProfileManager(Store);
 
   createMainWindow();
+
+  // Handle a mailto: link that arrived while the app was still launching
+  if (pendingMailtoUrl) {
+    openCreateWindow(pendingMailtoUrl);
+    pendingMailtoUrl = null;
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

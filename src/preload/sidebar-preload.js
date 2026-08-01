@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Receive profile updates
   onProfileUpdate: (callback) =>
     ipcRenderer.on("sidebar-profile-update", (event, profile) => callback(profile)),
+  // Receive Gmail unread count updates (for the dot on the mail icon)
+  onUnreadChange: (callback) =>
+    ipcRenderer.on("sidebar-unread", (event, count) => callback(count)),
 });

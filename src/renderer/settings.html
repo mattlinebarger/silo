@@ -461,6 +461,22 @@
     let editingProfileId = null;
     
     const ALL_APPS = ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
+
+    // Build avatar contents with DOM APIs (never interpolate paths/names into HTML)
+    function setAvatarContent(container, avatarPath, altText) {
+      container.textContent = '';
+      if (avatarPath) {
+        const img = document.createElement('img');
+        img.src = 'file://' + avatarPath;
+        img.alt = altText || 'Profile';
+        container.appendChild(img);
+      } else {
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-outlined';
+        icon.textContent = 'account_circle';
+        container.appendChild(icon);
+      }
+    }
     
     function getEnabledApps() {
       return ALL_APPS.filter(app => {
@@ -498,11 +514,7 @@
         const avatar = document.createElement('div');
         avatar.className = 'profile-avatar';
         
-        if (profile.avatarPath) {
-          avatar.innerHTML = `<img src="file://${profile.avatarPath}" alt="${profile.name}" />`;
-        } else {
-          avatar.innerHTML = '<span class="material-symbols-outlined">account_circle</span>';
-        }
+        setAvatarContent(avatar, profile.avatarPath, profile.name);
 
         const info = document.createElement('div');
         info.className = 'profile-info';
@@ -591,13 +603,8 @@
       const preview = document.getElementById('avatarPreview');
       const removeBtn = document.getElementById('removeAvatarBtn');
       
-      if (avatarPath) {
-        preview.innerHTML = `<img src="file://${avatarPath}" alt="Profile" />`;
-        removeBtn.style.display = 'block';
-      } else {
-        preview.innerHTML = '<span class="material-symbols-outlined">account_circle</span>';
-        removeBtn.style.display = 'none';
-      }
+      setAvatarContent(preview, avatarPath);
+      removeBtn.style.display = avatarPath ? 'block' : 'none';
     }
 
     async function saveProfile() {

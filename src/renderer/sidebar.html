@@ -34,6 +34,23 @@
         align-items: center;
         justify-content: center;
         cursor: pointer;
+        position: relative;
+      }
+
+      .unread-dot {
+        display: none;
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #d93025;
+        pointer-events: none;
+      }
+
+      .item.has-unread .unread-dot {
+        display: block;
       }
 
       .item.active {
@@ -142,6 +159,7 @@
   <body>
     <div id="mail" class="item active">
       <span class="icon">mail</span>
+      <span class="unread-dot"></span>
     </div>
 
     <div id="calendar" class="item">
@@ -228,6 +246,14 @@
         if (window.electronAPI && window.electronAPI.onActiveChange) {
           window.electronAPI.onActiveChange((id) => {
             setActive(id);
+          });
+        }
+
+        // Show/hide the unread dot on the mail icon
+        if (window.electronAPI && window.electronAPI.onUnreadChange) {
+          window.electronAPI.onUnreadChange((count) => {
+            const mailItem = document.getElementById("mail");
+            mailItem.classList.toggle("has-unread", count > 0);
           });
         }
 
