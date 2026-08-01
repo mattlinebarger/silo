@@ -4,6 +4,7 @@ const {
   WebContentsView,
   Menu,
   MenuItem,
+  Notification,
   clipboard,
   ipcMain,
   shell,
@@ -21,6 +22,7 @@ let views = {}; // Registry of all WebContentsViews keyed by name (mail, calenda
 let currentView = "mail"; // Tracks which content view is currently visible
 let profileManager = null; // Profile manager instance
 let lastSessionSyncAt = 0; // Debounce so reloaded views can't re-trigger a sync loop
+let pendingMailtoUrl = null; // mailto: link received before the app finished launching
 
 const isMac = process.platform === "darwin";
 
@@ -198,11 +200,82 @@ function isInternalUrl(url) {
 // IPC: Update macOS dock badge with unread count from Gmail
 // Triggered by preload script watching Gmail's document title
 ipcMain.on("unread-count", (event, count) => {
+  const n = Number(count);
+  const unread = Number.isFinite(n) && n > 0 ? n : 0;
   if (isMac && app.dock) {
-    const n = Number(count);
-    app.dock.setBadge(Number.isFinite(n) && n > 0 ? String(n) : "");
+    app.dock.setBadge(unread > 0 ? String(unread) : "");
+  }
+  // Mirror the count as a dot on the sidebar's mail icon
+  if (views.sidebar && !views.sidebar.webContents.isDestroyed()) {
+    views.sidebar.webContents.send("sidebar-unread", unread);
   }
 });
+
+// Convert a mailto: URL into a Gmail compose URL
+// Supports to, subject, body, cc, bcc
+function mailtoToComposeUrl(mailtoUrl) {
+  try {
+    const u = new URL(mailtoUrl);
+    if (u.protocol !== "mailto:") return null;
+    const compose = new URL("https://mail.google.com/mail/");
+    compose.searchParams.set("view", "cm");
+    compose.searchParams.set("fs", "1");
+    const to = decodeURIComponent(u.pathname || "");
+    if (to) compose.searchParams.set("to", to);
+    const paramMap = { subject: "su", body: "body", cc: "cc", bcc: "bcc" };
+    for (const [from, target] of Object.entries(paramMap)) {
+      const value = u.searchParams.get(from);
+      if (value) compose.searchParams.set(target, value);
+    }
+    return compose.toString();
+  } catch {
+    return null;
+  }
+}
+
+// macOS delivers mailto: links (Silo is registered for the scheme in
+// package.json build config) via open-url, which can fire before ready
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  const composeUrl = mailtoToComposeUrl(url);
+  if (!composeUrl) return;
+  if (profileManager) {
+    openCreateWindow(composeUrl);
+  } else {
+    pendingMailtoUrl = composeUrl;
+  }
+});
+
+// Download handling: dock progress bar while downloading, notification with
+// "reveal in Finder" on completion. Attached once per session (profiles have
+// their own partitions, so there can be several).
+const downloadHandledSessions = new WeakSet();
+function setupDownloads(sess) {
+  if (downloadHandledSessions.has(sess)) return;
+  downloadHandledSessions.add(sess);
+
+  sess.on("will-download", (event, item) => {
+    item.on("updated", () => {
+      if (mainWindow && !mainWindow.isDestroyed() && item.getTotalBytes() > 0) {
+        mainWindow.setProgressBar(item.getReceivedBytes() / item.getTotalBytes());
+      }
+    });
+    item.once("done", (e, state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+      if (state === "completed") {
+        const savePath = item.getSavePath();
+        const notification = new Notification({
+          title: "Download complete",
+          body: path.basename(savePath),
+        });
+        notification.on("click", () => shell.showItemInFolder(savePath));
+        notification.show();
+      }
+    });
+  });
+}
 
 // Profile IPC handlers
 ipcMain.handle("profiles:get-all", () => {
@@ -384,6 +457,21 @@ function createContentView(key, partition = null) {
   view.webContents.on('context-menu', (event, params) => {
     const menu = new Menu();
 
+    // Spelling suggestions for misspelled words in editable fields
+    if (params.misspelledWord) {
+      for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+        menu.append(new MenuItem({
+          label: suggestion,
+          click: () => view.webContents.replaceMisspelling(suggestion)
+        }));
+      }
+      menu.append(new MenuItem({
+        label: 'Add to Dictionary',
+        click: () => view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord)
+      }));
+      menu.append(new MenuItem({ type: 'separator' }));
+    }
+
     // Add link options if right-clicked on a link
     if (params.linkURL) {
       if (isGoogleAppUrl(params.linkURL)) {
@@ -529,8 +617,26 @@ function createContentView(key, partition = null) {
     }
   });
 
+  setupDownloads(view.webContents.session);
   view.webContents.loadURL(VIEW_URLS[key]);
   return view;
+}
+
+// Lazy loading: views are created on first visit and kept alive afterwards.
+// Keeps startup light (one renderer instead of eight) while preserving
+// instant switching between already-visited apps.
+function ensureView(key) {
+  if (views[key] && !views[key].webContents.isDestroyed()) {
+    return views[key];
+  }
+  if (key === "settings") {
+    views[key] = createSettingsView();
+  } else {
+    const activeProfile = profileManager.getActiveProfile();
+    const partition = profileManager.getPartitionName(activeProfile.id);
+    views[key] = createContentView(key, partition);
+  }
+  return views[key];
 }
 
 function createSettingsView() {
@@ -579,27 +685,21 @@ function recreateViews(targetViewOverride = null) {
 
   const previousView = currentView;
 
-  // Remove all content views from window and close them to clear session
-  for (const key of Object.keys(VIEW_URLS)) {
-    if (views[key]) {
-      try {
-        mainWindow.contentView.removeChildView(views[key]);
-        views[key].webContents.close();
-      } catch (e) {
-        console.error(`Error closing view ${key}:`, e);
-      }
+  // Remove all content views from window and close them to clear session.
+  // Views are lazy, so only the ones the user actually visited exist.
+  for (const key of Object.keys(views)) {
+    if (key === 'sidebar') continue;
+    try {
+      mainWindow.contentView.removeChildView(views[key]);
+      views[key].webContents.close();
+    } catch (e) {
+      console.error(`Error closing view ${key}:`, e);
     }
+    delete views[key];
   }
 
-  // Get new partition for active profile
   const activeProfile = profileManager.getActiveProfile();
-  const partition = profileManager.getPartitionName(activeProfile.id);
   const enabledApps = activeProfile.enabledApps || ['mail', 'calendar', 'drive', 'gemini', 'keep', 'tasks', 'contacts'];
-
-  // Recreate all views with new partition
-  for (const key of Object.keys(VIEW_URLS)) {
-    views[key] = key === 'settings' ? createSettingsView() : createContentView(key, partition);
-  }
 
   // Check if current view is enabled, if not switch to first enabled app
   // Use override if provided (e.g., when switching profiles)
@@ -609,8 +709,8 @@ function recreateViews(targetViewOverride = null) {
     targetView = enabledApps[0] || 'mail';
   }
 
-  // Re-show target view (sidebar added last stays on top)
-  mainWindow.contentView.addChildView(views[targetView]);
+  // Re-show target view with the new partition (sidebar added last stays on top)
+  mainWindow.contentView.addChildView(ensureView(targetView));
   mainWindow.contentView.addChildView(views.sidebar);
   currentView = targetView;
 
@@ -648,17 +748,17 @@ function showView(name) {
   currentView = name;
 
   // Remove all content views from window (but don't close them)
-  for (const key of Object.keys(VIEW_URLS)) {
-    if (views[key]) {
+  for (const key of Object.keys(views)) {
+    if (key !== 'sidebar') {
       try {
         mainWindow.contentView.removeChildView(views[key]);
       } catch {}
     }
   }
 
-  // Re-add target content view and sidebar
+  // Re-add target content view (created on first visit) and sidebar
   // Sidebar must be added last to maintain proper z-order
-  mainWindow.contentView.addChildView(views[name]);
+  mainWindow.contentView.addChildView(ensureView(name));
   mainWindow.contentView.addChildView(views.sidebar);
 
   views.sidebar.webContents.send("sidebar-set-active", name);
@@ -686,6 +786,7 @@ function openCreateWindow(url) {
   });
 
   attachWindowGuards(win);
+  setupDownloads(win.webContents.session);
   win.loadURL(url);
   win.focus();
 }
@@ -752,6 +853,14 @@ function createMenu() {
           accelerator: "Cmd+,",
           icon: menuIcons.settings,
           click: () => showView("settings"),
+        },
+        {
+          label: "Set as Default Email App",
+          enabled: !app.isDefaultProtocolClient("mailto"),
+          click: () => {
+            app.setAsDefaultProtocolClient("mailto");
+            createMenu(); // Refresh so the item greys out once set
+          },
         },
         { type: "separator" },
         { role: "hide" },
@@ -850,6 +959,22 @@ function createMenu() {
           },
         },
         { type: "separator" },
+        {
+          label: "Zoom In",
+          accelerator: "Cmd+Plus",
+          click: () => adjustZoom(+0.5),
+        },
+        {
+          label: "Zoom Out",
+          accelerator: "Cmd+-",
+          click: () => adjustZoom(-0.5),
+        },
+        {
+          label: "Actual Size",
+          accelerator: "Cmd+0",
+          click: () => adjustZoom(null),
+        },
+        { type: "separator" },
         { role: "togglefullscreen" },
       ],
     },
@@ -863,6 +988,17 @@ function createMenu() {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// Zoom applies to the currently visible view; null resets to default
+function adjustZoom(delta) {
+  const view = views[currentView];
+  if (!view || view.webContents.isDestroyed()) return;
+  if (delta === null) {
+    view.webContents.setZoomLevel(0);
+  } else {
+    view.webContents.setZoomLevel(view.webContents.getZoomLevel() + delta);
+  }
 }
 
 function createMainWindow() {
@@ -886,17 +1022,9 @@ function createMainWindow() {
 
   views.sidebar.webContents.loadFile(path.join(__dirname, "../renderer/sidebar.html"));
 
-  // Create all views at startup (no lazy loading)
-  // All Google apps load in background, ready for instant switching
-  // Views use session partition based on active profile for isolation
-  const activeProfile = profileManager.getActiveProfile();
-  const partition = profileManager.getPartitionName(activeProfile.id);
-
-  for (const key of Object.keys(VIEW_URLS)) {
-    views[key] = key === 'settings' ? createSettingsView() : createContentView(key, partition);
-  }
-
-  mainWindow.contentView.addChildView(views.mail);
+  // Only the mail view is created at startup; other apps are created lazily
+  // on first visit (ensureView) and stay alive afterwards
+  mainWindow.contentView.addChildView(ensureView("mail"));
   mainWindow.contentView.addChildView(views.sidebar);
 
   currentView = "mail";
@@ -939,6 +1067,12 @@ app.whenReady().then(async () => {
   profileManager = new ProfileManager(Store);
 
   createMainWindow();
+
+  // Handle a mailto: link that arrived while the app was still launching
+  if (pendingMailtoUrl) {
+    openCreateWindow(pendingMailtoUrl);
+    pendingMailtoUrl = null;
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
