@@ -44,6 +44,7 @@ Think of it as a sharp tool, not a Swiss Army knife.
   - Fast toggling between Gmail, Calendar, Drive, Keep, Tasks, Contacts, and Gemini
   - Separate persistent views for each app
 - **Additional Features**
+  - Dock badge with Gmail unread count
   - Minimal sidebar with Material-style icons and custom icons where needed
   - Native macOS menus and keyboard shortcuts
   - Custom settings panel
@@ -99,15 +100,9 @@ npm install
 Run the app in development mode:
 
 ```
-npRead [CONTRIBUTING.md](CONTRIBUTING.md) for Git workflow and branching strategy
-- Open an issue first to discuss ideas
-- Keep changes focused and small
-- Prefer clarity over cleverness
-- Follow the conventional commit format: `type(scope): description`
+npm start
+```
 
-This project values maintainability and restraint.
-
-See [GIT_QUICK_REFERENCE.md](GIT_QUICK_REFERENCE.md) for quick Git commands
 ## Platform Support
 
 Currently tested on:
@@ -133,9 +128,13 @@ Contributions are welcome, but expectations are intentionally modest.
 
 If you want to contribute:
 
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) for the Git workflow and branching strategy
 - Open an issue first to discuss ideas
 - Keep changes focused and small
 - Prefer clarity over cleverness
+- Follow the conventional commit format: `type(scope): description`
+
+See [GIT_QUICK_REFERENCE.md](GIT_QUICK_REFERENCE.md) for quick Git commands.
 
 This project values maintainability and restraint.
 
